@@ -394,27 +394,30 @@ class BrokerServer(
 
       // Create the request processor objects.
       val raftSupport = RaftSupport(forwardingManager, metadataCache)
-      dataPlaneRequestProcessor = new KafkaApis(
-        requestChannel = socketServer.dataPlaneRequestChannel,
-        metadataSupport = raftSupport,
-        replicaManager = replicaManager,
-        groupCoordinator = groupCoordinator,
-        txnCoordinator = transactionCoordinator,
-        autoTopicCreationManager = autoTopicCreationManager,
-        brokerId = config.nodeId,
-        config = config,
-        configRepository = metadataCache,
-        metadataCache = metadataCache,
-        metrics = metrics,
-        authorizer = authorizer,
-        quotas = quotaManagers,
-        fetchManager = fetchManager,
-        brokerTopicStats = brokerTopicStats,
-        clusterId = clusterId,
-        time = time,
-        tokenManager = tokenManager,
-        apiVersionManager = apiVersionManager,
-        clientMetricsManager = Some(clientMetricsManager))
+      val apisBuilder = KafkaApisBuilder().
+        withMetadataSupport(raftSupport).
+        withReplicaManager(replicaManager).
+        withGroupCoordinator(groupCoordinator).
+        withTxnCoordinator(transactionCoordinator).
+        withAutoTopicCreationManager(autoTopicCreationManager).
+        withBrokerId(config.nodeId).
+        withConfig(config).
+        withConfigRepository(metadataCache).
+        withMetadataCache(metadataCache).
+        withMetrics(metrics).
+        withAuthorizer(authorizer).
+        withQuotas(quotaManagers).
+        withFetchManager(fetchManager).
+        withBrokerTopicStats(brokerTopicStats).
+        withClusterId(clusterId).
+        withTime(time).
+        withTokenManager(tokenManager).
+        withApiVersionManager(apiVersionManager).
+        withClientMetricsManager(Some(clientMetricsManager))
+
+      dataPlaneRequestProcessor = apisBuilder.
+        withRequestChannel(socketServer.dataPlaneRequestChannel).
+        build()
 
       dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
@@ -535,6 +538,7 @@ class BrokerServer(
             config.earlyStartListeners.map(_.value()).asJava))
       }
       val authorizerFutures = endpointReadyFutures.futures().asScala.toMap
+      socketServer.setApiRequestHandlerBuilder(apisBuilder)
       val enableRequestProcessingFuture = socketServer.enableRequestProcessing(authorizerFutures)
 
       // Block here until all the authorizer futures are complete.

@@ -29,11 +29,12 @@ import kafka.cluster.{BrokerEndPoint, EndPoint}
 import kafka.network.Processor._
 import kafka.network.RequestChannel.{CloseConnectionResponse, EndThrottlingResponse, NoOpResponse, SendResponse, StartThrottlingResponse}
 import kafka.network.SocketServer._
-import kafka.server.{ApiVersionManager, BrokerReconfigurable, KafkaConfig}
+import kafka.server.{ApiRequestHandler, ApiRequestHandlerBuilder, ApiVersionManager, BrokerReconfigurable, KafkaConfig, RequestLocal}
 import org.apache.kafka.common.message.ApiMessageType.ListenerType
 import kafka.utils._
 import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.errors.InvalidRequestException
+import org.apache.kafka.common.internals.FatalExitError
 import org.apache.kafka.common.memory.{MemoryPool, SimpleMemoryPool}
 import org.apache.kafka.common.metrics._
 import org.apache.kafka.common.metrics.stats.{Avg, CumulativeSum, Meter, Rate}
@@ -106,6 +107,11 @@ class SocketServer(val config: KafkaConfig,
 
   private[this] val nextProcessorId: AtomicInteger = new AtomicInteger(0)
   val connectionQuotas = new ConnectionQuotas(config, time, metrics)
+
+  private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
+  private[kafka] def setApiRequestHandlerBuilder(apiRequestHandlerBuilder: ApiRequestHandlerBuilder): Unit =
+    this.apiRequestHandlerBuilder = Some(apiRequestHandlerBuilder)
+
 
   /**
    * A future which is completed once all the authorizer futures are complete.
@@ -220,6 +226,7 @@ class SocketServer(val config: KafkaConfig,
         } else {
           // Once the authorizer has started, attempt to start the associated acceptor. The Acceptor.start()
           // function will complete the acceptor started future (either successfully or not)
+          acceptor.setApiRequestHandlerBuilder(apiRequestHandlerBuilder)
           acceptor.start()
         }
       })
@@ -340,6 +347,7 @@ class SocketServer(val config: KafkaConfig,
         if (e != null) {
           acceptor.startedFuture.completeExceptionally(e)
         } else {
+          acceptor.setApiRequestHandlerBuilder(apiRequestHandlerBuilder)
           acceptor.start()
         }
       })
@@ -418,6 +426,104 @@ object SocketServer {
   ): Unit = {
     CoreUtils.swallow(channel.socket().close(), logging, Level.ERROR)
     CoreUtils.swallow(channel.close(), logging, Level.ERROR)
+  }
+}
+
+private[network] trait ReassignRoutes {
+  def reassignChannelIfNeeded(clientId: String,
+                              channel: KafkaChannel,
+                              oldSelector: KSelector,
+                              req: RequestChannel.Request,
+                              returnRoutes: ReassignRoutes): Boolean
+}
+
+private class FixedReassignRoutes(val destProcessor: Processor) extends ReassignRoutes {
+  private val channelReassignMap = ConcurrentHashMap.newKeySet[KafkaChannel]()
+
+  override def reassignChannelIfNeeded(clientId: String,
+                                       channel: KafkaChannel,
+                                       oldSelector: KSelector,
+                                       req: RequestChannel.Request,
+                                       returnRoutes: ReassignRoutes): Boolean = {
+    val needReassign = channelReassignMap.remove(channel)
+    if (needReassign) {
+      oldSelector.unregister(channel.id())
+      destProcessor.register(channel, req)
+    }
+    needReassign
+  }
+}
+
+private class ReassignRoutesToDedicatedP(endPoint: EndPoint,
+                                         config: KafkaConfig,
+                                         nodeId: Int,
+                                         connectionQuotas: ConnectionQuotas,
+                                         time: Time,
+                                         isPrivilegedListener: Boolean,
+                                         metrics: Metrics,
+                                         credentialProvider: CredentialProvider,
+                                         logContext: LogContext,
+                                         memoryPool: MemoryPool,
+                                         apiVersionManager: ApiVersionManager
+  ) extends ReassignRoutes {
+
+  private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
+
+  private val nextProcessorId: AtomicInteger = new AtomicInteger(0)
+  private val channelReassignMap = new ConcurrentHashMap[String, Option[Processor]]()
+
+  def addTargets(clientId: String): Unit = {
+    channelReassignMap.putIfAbsent(clientId, None)
+  }
+
+  def setApiRequestHandlerBuilder(apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]): Unit = {
+    this.apiRequestHandlerBuilder = apiRequestHandlerBuilder
+    channelReassignMap.forEach((_, p) =>
+      p.foreach(_.setDedicatedHandler(apiRequestHandlerBuilder))
+    )
+  }
+
+  override def reassignChannelIfNeeded(clientId: String,
+                                       channel: KafkaChannel,
+                                       oldSelector: KSelector,
+                                       req: RequestChannel.Request,
+                                       returnRoutes: ReassignRoutes): Boolean = {
+    var reassigned: Boolean = false
+    channelReassignMap.computeIfPresent(clientId, (_, oldProcessor) => {
+      val destProcessor = oldProcessor match {
+        case Some(p) => p
+        case None => newDedicatedProcessor(returnRoutes)
+      }
+      oldSelector.unregister(channel.id())
+      destProcessor.register(channel, req)
+      reassigned = true
+      Some(destProcessor)
+    })
+    reassigned
+  }
+
+  private def newDedicatedProcessor(reassignRoutes: ReassignRoutes): Processor = {
+    val id = nextProcessorId.getAndIncrement()
+    val name = s"kafka-dedicated-thread-$nodeId-${endPoint.listenerName}-${endPoint.securityProtocol}-$id"
+    createDedicatedProcessor(id,
+                             time,
+                             config.socketRequestMaxBytes,
+                             connectionQuotas,
+                             config.connectionsMaxIdleMs,
+                             config.failedAuthenticationDelayMs,
+                             endPoint.listenerName,
+                             endPoint.securityProtocol,
+                             config,
+                             metrics,
+                             credentialProvider,
+                             memoryPool,
+                             logContext,
+                             Processor.ConnectionQueueSize,
+                             isPrivilegedListener,
+                             apiVersionManager,
+                             name,
+                             reassignRoutes,
+                             apiRequestHandlerBuilder)
   }
 }
 
@@ -606,6 +712,10 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
     newPort
   }
 
+  private val reassignRoutesForBoosting: ReassignRoutesToDedicatedP = new ReassignRoutesToDedicatedP(
+    endPoint, config, nodeId, connectionQuotas, time, isPrivilegedListener, metrics,
+    credentialProvider, logContext, memoryPool, apiVersionManager)
+
   private[network] val processors = new ArrayBuffer[Processor]()
   // Build the metric name explicitly in order to keep the existing name for compatibility
   private val blockedPercentMeterMetricName = KafkaMetricsGroup.explicitMetricName(
@@ -622,6 +732,10 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
   val thread: KafkaThread = KafkaThread.nonDaemon(
     s"${threadPrefix()}-kafka-socket-acceptor-${endPoint.listenerName}-${endPoint.securityProtocol}-${endPoint.port}",
     this)
+
+  def setApiRequestHandlerBuilder(apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]): Unit = {
+    reassignRoutesForBoosting.setApiRequestHandlerBuilder(apiRequestHandlerBuilder)
+  }
 
   def start(): Unit = synchronized {
     try {
@@ -861,24 +975,25 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
 
   def newProcessor(id: Int, listenerName: ListenerName, securityProtocol: SecurityProtocol): Processor = {
     val name = s"${threadPrefix()}-kafka-network-thread-$nodeId-${endPoint.listenerName}-${endPoint.securityProtocol}-$id"
-    new Processor(id,
-                  time,
-                  config.socketRequestMaxBytes,
-                  requestChannel,
-                  connectionQuotas,
-                  config.connectionsMaxIdleMs,
-                  config.failedAuthenticationDelayMs,
-                  listenerName,
-                  securityProtocol,
-                  config,
-                  metrics,
-                  credentialProvider,
-                  memoryPool,
-                  logContext,
-                  Processor.ConnectionQueueSize,
-                  isPrivilegedListener,
-                  apiVersionManager,
-                  name)
+    createNormalProcessor(id,
+                          time,
+                          config.socketRequestMaxBytes,
+                          requestChannel,
+                          connectionQuotas,
+                          config.connectionsMaxIdleMs,
+                          config.failedAuthenticationDelayMs,
+                          listenerName,
+                          securityProtocol,
+                          config,
+                          metrics,
+                          credentialProvider,
+                          memoryPool,
+                          logContext,
+                          Processor.ConnectionQueueSize,
+                          isPrivilegedListener,
+                          apiVersionManager,
+                          name,
+                          reassignRoutesForBoosting)
   }
 }
 
@@ -887,6 +1002,88 @@ private[kafka] object Processor {
   val NetworkProcessorMetricTag = "networkProcessor"
   val ListenerMetricTag = "listener"
   val ConnectionQueueSize = 20
+
+  def createNormalProcessor(id: Int,
+            time: Time,
+            maxRequestSize: Int,
+            requestChannel: RequestChannel,
+            connectionQuotas: ConnectionQuotas,
+            connectionsMaxIdleMs: Long,
+            failedAuthenticationDelayMs: Int,
+            listenerName: ListenerName,
+            securityProtocol: SecurityProtocol,
+            config: KafkaConfig,
+            metrics: Metrics,
+            credentialProvider: CredentialProvider,
+            memoryPool: MemoryPool,
+            logContext: LogContext,
+            connectionQueueSize: Int,
+            isPrivilegedListener: Boolean,
+            apiVersionManager: ApiVersionManager,
+            threadName: String,
+            channelReassignRoutes: ReassignRoutes): Processor =
+    new Processor(id,
+                  time,
+                  maxRequestSize,
+                  requestChannel,
+                  connectionQuotas,
+                  connectionsMaxIdleMs,
+                  failedAuthenticationDelayMs,
+                  listenerName,
+                  securityProtocol,
+                  config,
+                  metrics,
+                  credentialProvider,
+                  memoryPool,
+                  logContext,
+                  connectionQueueSize,
+                  isPrivilegedListener,
+                  apiVersionManager,
+                  threadName,
+                  channelReassignRoutes,
+                  None)
+
+  def createDedicatedProcessor(
+    id: Int,
+    time: Time,
+    maxRequestSize: Int,
+    connectionQuotas: ConnectionQuotas,
+    connectionsMaxIdleMs: Long,
+    failedAuthenticationDelayMs: Int,
+    listenerName: ListenerName,
+    securityProtocol: SecurityProtocol,
+    config: KafkaConfig,
+    metrics: Metrics,
+    credentialProvider: CredentialProvider,
+    memoryPool: MemoryPool,
+    logContext: LogContext,
+    connectionQueueSize: Int,
+    isPrivilegedListener: Boolean,
+    apiVersionManager: ApiVersionManager,
+    threadName: String,
+    channelReassignRoutes: ReassignRoutes,
+    apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]
+  ): Processor =
+    new Processor(id,
+      time,
+      maxRequestSize,
+      new RequestChannel(20, s"dedicatedProcessor$id-", time, apiVersionManager.newRequestMetrics),
+      connectionQuotas,
+      connectionsMaxIdleMs,
+      failedAuthenticationDelayMs,
+      listenerName,
+      securityProtocol,
+      config,
+      metrics,
+      credentialProvider,
+      memoryPool,
+      logContext,
+      connectionQueueSize,
+      isPrivilegedListener,
+      apiVersionManager,
+      threadName,
+      channelReassignRoutes,
+      apiRequestHandlerBuilder)
 }
 
 /**
@@ -899,7 +1096,7 @@ private[kafka] object Processor {
  *                             forwarding requests; if the control plane is not defined, the processor
  *                             relying on the inter broker listener would be acting as the privileged listener.
  */
-private[kafka] class Processor(
+private[kafka] class Processor private[network] (
   val id: Int,
   time: Time,
   maxRequestSize: Int,
@@ -917,7 +1114,9 @@ private[kafka] class Processor(
   connectionQueueSize: Int,
   isPrivilegedListener: Boolean,
   apiVersionManager: ApiVersionManager,
-  threadName: String
+  threadName: String,
+  channelReassignRoutes: ReassignRoutes,
+  requestHandlerBuilder: Option[ApiRequestHandlerBuilder],
 ) extends Runnable with Logging {
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
 
@@ -941,9 +1140,31 @@ private[kafka] class Processor(
     override def toString: String = s"$localHost:$localPort-$remoteHost:$remotePort-$index"
   }
 
+  private val returnReassignRoutes = new FixedReassignRoutes(this)
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
+  private val reassignedChannels = new ArrayBlockingQueue[KafkaChannel](connectionQueueSize)
+  private val reassignedRequests = new ConcurrentHashMap[String, RequestChannel.Request]()
+
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
+
+  private case class DedicatedHandler(apis: ApiRequestHandler, requestLocal: RequestLocal) {
+  }
+
+  private var dedicatedHandler: Option[DedicatedHandler] = requestHandlerBuilder.map(builder =>
+    DedicatedHandler(
+      builder.withRequestChannel(requestChannel).build(),
+      RequestLocal.withThreadConfinedCaching
+    )
+  )
+
+  private[kafka] def setDedicatedHandler(newRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]): Unit =
+    this.dedicatedHandler = newRequestHandlerBuilder.map(builder =>
+      DedicatedHandler(
+        builder.withRequestChannel(requestChannel).build(),
+        RequestLocal.withThreadConfinedCaching
+      )
+    )
 
   private[kafka] val metricTags = mutable.LinkedHashMap(
     ListenerMetricTag -> listenerName.value,
@@ -1009,10 +1230,12 @@ private[kafka] class Processor(
         try {
           // setup any new connections that have been queued up
           configureNewConnections()
+          configureReConnections()
           // register any new responses for writing
           processNewResponses()
           poll()
           processCompletedReceives()
+          handleRequestIfExist()
           processCompletedSends()
           processDisconnected()
           closeExcessConnections()
@@ -1126,6 +1349,19 @@ private[kafka] class Processor(
   }
 
   private def processCompletedReceives(): Unit = {
+    val iterator = reassignedRequests.entrySet().iterator()
+    while (iterator.hasNext) {
+      val entry = iterator.next()
+      try {
+        requestChannel.sendRequest(entry.getValue)
+      } catch {
+        case e: Throwable =>
+          processChannelException(entry.getKey, s"Exception while processing request from ${entry.getKey}", e)
+      } finally {
+        iterator.remove()
+      }
+    }
+
     selector.completedReceives.forEach { receive =>
       var header: RequestHeader = null
       var req: RequestChannel.Request = null
@@ -1163,9 +1399,11 @@ private[kafka] class Processor(
                       apiVersionsRequest.data.clientSoftwareVersion))
                   }
                 }
-                requestChannel.sendRequest(req)
-                selector.mute(connectionId)
-                handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
+                if (!channelReassignRoutes.reassignChannelIfNeeded(req.header.clientId(), channel, selector, req, returnReassignRoutes)) {
+                  requestChannel.sendRequest(req)
+                  selector.mute(connectionId)
+                  handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
+                }
               }
             }
           case None =>
@@ -1302,6 +1540,110 @@ private[kafka] class Processor(
           processException(s"Processor $id closed connection from $remoteAddress", e)
       }
     }
+  }
+
+  /**
+   * Registers a reassigned Kafka channel and its associated pending request with this processor.
+   * The channel will be added to the selector during the next `configureReConnections` call.
+   */
+  def register(kafkaChannel: KafkaChannel, req: RequestChannel.Request): Boolean = {
+    reassignedChannels.put(kafkaChannel)
+    reassignedRequests.put(kafkaChannel.id(), req)
+    true
+  }
+
+  /**
+   * Configures channels that have been reassigned to this processor by registering them with the selector.
+   * If a channel already has a pending request in `reassignedRequests`, it is muted to prevent reading
+   * additional data before the current request is handled.
+   */
+  private def configureReConnections(): Unit = {
+    var connectionsProcessed = 0
+    while (connectionsProcessed < connectionQueueSize && !reassignedChannels.isEmpty) {
+      val channel = reassignedChannels.poll()
+      try {
+        debug(s"Processor $id listening to connection from ${channel.socketAddress()}:${channel.socketPort()}")
+        selector.reregister(channel)
+        if (reassignedRequests.containsKey(channel.id())) {
+          selector.mute(channel.id())
+          handleChannelMuteEvent(channel.id(), ChannelMuteEvent.REQUEST_RECEIVED)
+        }
+        connectionsProcessed += 1
+      } catch {
+        // We explicitly catch all exceptions and close the socket to avoid a socket leak.
+        case e: Throwable =>
+          // need to close the channel here to avoid a socket leak.
+          connectionQuotas.closeChannel(this, listenerName, channel)
+          processException(s"Processor $id closed connection from ${channel.socketAddress()}:${channel.socketPort()}", e)
+      }
+    }
+  }
+
+  /**
+   * Handles requests directly if a `dedicatedHandler` is configured for this processor.
+   * This allows the processor to bypass the standard request handler pool and process
+   * Shutdown, Callback, or standard Requests using its own API handler.
+   */
+  private def handleRequestIfExist(): Unit = {
+    dedicatedHandler.foreach(h => {
+      val apis = h.apis
+      val requestLocal = h.requestLocal
+
+      val req = requestChannel.receiveRequest(0)
+      val reqGetTime = time.nanoseconds
+      req match {
+        case RequestChannel.ShutdownRequest =>
+          debug(s"Kafka dedicated processor $id received shut down command")
+          beginShutdown()
+
+        case callback: RequestChannel.CallbackRequest =>
+          val originalRequest = callback.originalRequest
+          try {
+
+            // If we've already executed a callback for this request, reset the times and subtract the callback time from the
+            // new dequeue time. This will allow calculation of multiple callback times.
+            // Otherwise, set dequeue time to now.
+            if (originalRequest.callbackRequestDequeueTimeNanos.isDefined) {
+              val prevCallbacksTimeNanos = originalRequest.callbackRequestCompleteTimeNanos.getOrElse(0L) - originalRequest.callbackRequestDequeueTimeNanos.getOrElse(0L)
+              originalRequest.callbackRequestCompleteTimeNanos = None
+              originalRequest.callbackRequestDequeueTimeNanos = Some(time.nanoseconds() - prevCallbacksTimeNanos)
+            } else {
+              originalRequest.callbackRequestDequeueTimeNanos = Some(time.nanoseconds())
+            }
+            callback.fun(requestLocal)
+          } catch {
+            case e: FatalExitError =>
+              CoreUtils.swallow(closeAll(), this, Level.ERROR)
+              Exit.exit(e.statusCode)
+            case e: Throwable => error("Exception when handling request", e)
+          } finally {
+            // When handling requests, we try to complete actions after, so we should try to do so here as well.
+            apis.tryCompleteActions()
+            if (originalRequest.callbackRequestCompleteTimeNanos.isEmpty)
+              originalRequest.callbackRequestCompleteTimeNanos = Some(time.nanoseconds())
+          }
+
+        case request: RequestChannel.Request =>
+          try {
+            request.requestDequeueTimeNanos = reqGetTime
+            trace(s"Kafka dedicated processor $id handling request $request")
+            apis.handle(request, requestLocal)
+          } catch {
+            case e: FatalExitError =>
+              CoreUtils.swallow(closeAll(), this, Level.ERROR)
+              Exit.exit(e.statusCode)
+            case e: Throwable => error("Exception when handling request", e)
+          } finally {
+            request.releaseBuffer()
+          }
+
+        case RequestChannel.WakeupRequest =>
+          // We should handle this in receiveRequest by polling callbackQueue.
+          warn("Received a wakeup request outside of typical usage.")
+
+        case null => // continue
+      }
+    })
   }
 
   /**
@@ -1823,4 +2165,14 @@ class ConnectionQuotas(config: KafkaConfig, time: Time, metrics: Metrics) extend
     }
   }
 
+  /**
+   * Close `KafkaChannel` and decrement the connection count.
+   */
+  def closeChannel(log: Logging, listenerName: ListenerName, channel: KafkaChannel): Unit = {
+    if (channel != null) {
+      log.debug(s"Closing connection from ${channel.socketAddress()}:${channel.socketPort()}")
+      dec(listenerName, channel.socketAddress())
+      CoreUtils.swallow(channel.close(), log, Level.ERROR)
+    }
+  }
 }

@@ -37,6 +37,11 @@ trait ApiRequestHandler {
   def tryCompleteActions(): Unit = {}
 }
 
+trait ApiRequestHandlerBuilder {
+  def build(): ApiRequestHandler
+  def withRequestChannel(requestChannel: RequestChannel): ApiRequestHandlerBuilder
+}
+
 object KafkaRequestHandler {
   // Support for scheduling callbacks on a request thread.
   private val threadRequestChannel = new ThreadLocal[RequestChannel]

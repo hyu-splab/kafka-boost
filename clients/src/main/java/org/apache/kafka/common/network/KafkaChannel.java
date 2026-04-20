@@ -691,4 +691,27 @@ public class KafkaChannel implements AutoCloseable {
         if (send != null)
             this.transportLayer.addInterestOps(SelectionKey.OP_WRITE);
     }
+
+    /**
+     * Unregisters the selection key from the current selector.
+     */
+    public void unregisterSelector() {
+        SelectionKey oldKey = transportLayer.selectionKey();
+        oldKey.cancel();
+    }
+
+    /**
+     * Reregisters the selection key with a new selector.
+     * @param newNioSelector The new selector to register with
+     * @throws IOException If the registration fails
+     * @throws IllegalStateException If the current selection key is still valid
+     */
+    public void reregisterSelector(java.nio.channels.Selector newNioSelector) throws IOException {
+        SelectionKey oldKey = transportLayer.selectionKey();
+        if (oldKey.isValid()) {
+            throw new IllegalStateException("Cannot reregister a channel that is still valid on another selector.");
+        }
+        SelectionKey newKey = transportLayer.socketChannel().register(newNioSelector, SelectionKey.OP_READ, this);
+        transportLayer.updateSelectionKey(newKey);
+    }
 }

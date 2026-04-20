@@ -2153,6 +2153,11 @@ class SocketServerTest {
     def isOpen: Boolean = serverChannel.isOpen
   }
 
+  class TestReassignRoutes extends ReassignRoutes {
+
+    override def reassignChannelIfNeeded(clientId: String, channel: KafkaChannel, oldSelector: Selector, req: RequestChannel.Request, returnRoutes: ReassignRoutes): Boolean = false
+  }
+
   class TestableProcessor(id: Int, time: Time, requestChannel: RequestChannel, listenerName: ListenerName, securityProtocol: SecurityProtocol, config: KafkaConfig, connectionQuotas: ConnectionQuotas, connectionQueueSize: Int, isPrivilegedListener: Boolean)
   extends Processor(id,
                     time,
@@ -2171,7 +2176,9 @@ class SocketServerTest {
                     connectionQueueSize,
                     isPrivilegedListener,
                     apiVersionManager,
-                    s"TestableProcessor$id") {
+                    s"TestableProcessor$id",
+                    new TestReassignRoutes(),
+                    None) {
     private var connectionId: Option[String] = None
     private var conn: Option[Socket] = None
 

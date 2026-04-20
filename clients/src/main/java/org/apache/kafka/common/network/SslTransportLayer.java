@@ -76,7 +76,7 @@ public class SslTransportLayer implements TransportLayer {
 
     private final String channelId;
     private final SSLEngine sslEngine;
-    private final SelectionKey key;
+    private SelectionKey key;
     private final SocketChannel socketChannel;
     private final ChannelMetadataRegistry metadataRegistry;
     private final Logger log;
@@ -108,6 +108,15 @@ public class SslTransportLayer implements TransportLayer {
 
         final LogContext logContext = new LogContext(String.format("[SslTransportLayer channelId=%s key=%s] ", channelId, key));
         this.log = logContext.logger(getClass());
+    }
+
+    @Override
+    public void updateSelectionKey(SelectionKey key) {
+        if (key == null)
+            throw new IllegalArgumentException("New key cannot be null");
+        if (key.channel() != socketChannel)
+            throw new IllegalArgumentException("New key must belong to the same socket channel");
+        this.key = key;
     }
 
     // Visible for testing

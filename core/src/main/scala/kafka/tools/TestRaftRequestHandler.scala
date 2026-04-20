@@ -19,7 +19,7 @@ package kafka.tools
 
 import kafka.network.RequestChannel
 import kafka.raft.RaftManager
-import kafka.server.{ApiRequestHandler, ApiVersionManager, RequestLocal}
+import kafka.server.{ApiRequestHandler, ApiRequestHandlerBuilder, ApiVersionManager, RequestLocal}
 import kafka.utils.Logging
 import org.apache.kafka.common.internals.FatalExitError
 import org.apache.kafka.common.message.{BeginQuorumEpochResponseData, EndQuorumEpochResponseData, FetchResponseData, FetchSnapshotResponseData, VoteResponseData}
@@ -110,4 +110,23 @@ class TestRaftRequestHandler(
     })
   }
 
+}
+
+case class TestRaftRequestHandlerBuilder(
+  raftManager: RaftManager[_] = null,
+  requestChannel: RequestChannel = null,
+  time: Time = Time.SYSTEM,
+  apiVersionManager: ApiVersionManager = null
+) extends ApiRequestHandlerBuilder {
+  def withRaftManager(raftManager: RaftManager[_]): TestRaftRequestHandlerBuilder = copy(raftManager = raftManager)
+  override def withRequestChannel(requestChannel: RequestChannel): TestRaftRequestHandlerBuilder = copy(requestChannel = requestChannel)
+  def withTime(time: Time): TestRaftRequestHandlerBuilder = copy(time = time)
+  def withApiVersionManager(apiVersionManager: ApiVersionManager): TestRaftRequestHandlerBuilder = copy(apiVersionManager = apiVersionManager)
+
+  override def build(): ApiRequestHandler = {
+    if (raftManager == null) throw new RuntimeException("you must set raftManager")
+    if (requestChannel == null) throw new RuntimeException("you must set requestChannel")
+    if (apiVersionManager == null) throw new RuntimeException("You must set apiVersionManager")
+    new TestRaftRequestHandler(raftManager, requestChannel, time, apiVersionManager)
+  }
 }

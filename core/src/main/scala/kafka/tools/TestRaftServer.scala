@@ -117,12 +117,13 @@ class TestRaftServer(
       recordSize = 256
     )
 
-    val requestHandler = new TestRaftRequestHandler(
-      raftManager,
-      socketServer.dataPlaneRequestChannel,
-      time,
-      apiVersionManager
-    )
+    val requestHandlerBuilder = TestRaftRequestHandlerBuilder().
+      withRaftManager(raftManager).
+      withTime(time).
+      withApiVersionManager(apiVersionManager)
+    val requestHandler = requestHandlerBuilder.
+      withRequestChannel(socketServer.dataPlaneRequestChannel).
+      build()
 
     dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(
       config.brokerId,
@@ -136,6 +137,7 @@ class TestRaftServer(
 
     workloadGenerator.start()
     raftManager.startup()
+    socketServer.setApiRequestHandlerBuilder(requestHandlerBuilder)
     socketServer.enableRequestProcessing(Map.empty)
   }
 

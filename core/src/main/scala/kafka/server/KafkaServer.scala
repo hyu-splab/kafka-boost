@@ -582,27 +582,30 @@ class KafkaServer(
         /* start processing requests */
         val zkSupport = ZkSupport(adminManager, kafkaController, zkClient, forwardingManager, metadataCache, brokerEpochManager)
 
-        def createKafkaApis(requestChannel: RequestChannel): KafkaApis = new KafkaApis(
-          requestChannel = requestChannel,
-          metadataSupport = zkSupport,
-          replicaManager = replicaManager,
-          groupCoordinator = groupCoordinator,
-          txnCoordinator = transactionCoordinator,
-          autoTopicCreationManager = autoTopicCreationManager,
-          brokerId = config.brokerId,
-          config = config,
-          configRepository = configRepository,
-          metadataCache = metadataCache,
-          metrics = metrics,
-          authorizer = authorizer,
-          quotas = quotaManagers,
-          fetchManager = fetchManager,
-          brokerTopicStats = brokerTopicStats,
-          clusterId = clusterId,
-          time = time,
-          tokenManager = tokenManager,
-          apiVersionManager = apiVersionManager,
-          clientMetricsManager = None)
+        val apisBuilder = KafkaApisBuilder().
+          withMetadataSupport(zkSupport).
+          withReplicaManager(replicaManager).
+          withGroupCoordinator(groupCoordinator).
+          withTxnCoordinator(transactionCoordinator).
+          withAutoTopicCreationManager(autoTopicCreationManager).
+          withBrokerId(config.nodeId).
+          withConfig(config).
+          withConfigRepository(configRepository).
+          withMetadataCache(metadataCache).
+          withMetrics(metrics).
+          withAuthorizer(authorizer).
+          withQuotas(quotaManagers).
+          withFetchManager(fetchManager).
+          withBrokerTopicStats(brokerTopicStats).
+          withClusterId(clusterId).
+          withTime(time).
+          withTokenManager(tokenManager).
+          withApiVersionManager(apiVersionManager).
+          withClientMetricsManager(None)
+
+        def createKafkaApis(requestChannel: RequestChannel): KafkaApis = apisBuilder.
+          withRequestChannel(requestChannel).
+          build
 
         dataPlaneRequestProcessor = createKafkaApis(socketServer.dataPlaneRequestChannel)
 
@@ -644,6 +647,7 @@ class KafkaServer(
           }
         }
 
+        socketServer.setApiRequestHandlerBuilder(apisBuilder)
         val enableRequestProcessingFuture = socketServer.enableRequestProcessing(authorizerFutures)
         // Block here until all the authorizer futures are complete
         try {

@@ -369,6 +369,15 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    public void unregister(String id) {
+        KafkaChannel channel = this.channels.remove(id);
+        if (channel != null) channel.unregisterSelector();
+    }
+
+    public void reregister(KafkaChannel channel) throws IOException {
+        channel.reregisterSelector(nioSelector);
+    }
+
     /**
      * Interrupt the nioSelector if it is blocked waiting to do I/O.
      */

@@ -319,17 +319,22 @@ class ControllerServer(
         time,
         s"controller-${config.nodeId}-")
       clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas)
-      controllerApis = new ControllerApis(socketServer.dataPlaneRequestChannel,
-        authorizer,
-        quotaManagers,
-        time,
-        controller,
-        raftManager,
-        config,
-        clusterId,
-        registrationsPublisher,
-        apiVersionManager,
-        metadataCache)
+      val apisBuilder = ControllerApisBuilder().
+        withAuthorizer(authorizer).
+        withQuotas(quotaManagers).
+        withTime(time).
+        withController(controller).
+        withRaftManager(raftManager).
+        withConfig(config).
+        withClusterId(clusterId).
+        withRegistrationsPublisher(registrationsPublisher).
+        withApiVersionManager(apiVersionManager).
+        withMetadataCache(metadataCache)
+
+      controllerApis = apisBuilder.
+        withRequestChannel(socketServer.dataPlaneRequestChannel).
+        build()
+
       controllerApisHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel,
         controllerApis,
@@ -427,6 +432,7 @@ class ControllerServer(
 
       val authorizerFutures: Map[Endpoint, CompletableFuture[Void]] = endpointReadyFutures.futures().asScala.toMap
 
+      socketServer.setApiRequestHandlerBuilder(apisBuilder)
       /**
        * Enable the controller endpoint(s). If we are using an authorizer which stores
        * ACLs in the metadata log, such as StandardAuthorizer, we will be able to start

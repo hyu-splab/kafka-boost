@@ -4160,3 +4160,89 @@ object KafkaApis {
     new UnsupportedVersionException(s"Unsupported when using a Raft-based metadata quorum: $text")
   }
 }
+
+case class KafkaApisBuilder(
+  requestChannel: RequestChannel = null,
+  metadataSupport: MetadataSupport = null,
+  replicaManager: ReplicaManager = null,
+  groupCoordinator: GroupCoordinator = null,
+  txnCoordinator: TransactionCoordinator = null,
+  autoTopicCreationManager: AutoTopicCreationManager = null,
+  brokerId: Int = 0,
+  config: KafkaConfig = null,
+  configRepository: ConfigRepository = null,
+  metadataCache: MetadataCache = null,
+  metrics: Metrics = null,
+  authorizer: Option[Authorizer] = None,
+  quotas: QuotaFactory.QuotaManagers = null,
+  fetchManager: FetchManager = null,
+  brokerTopicStats: BrokerTopicStats = null,
+  clusterId: String = "clusterId",
+  time: Time = Time.SYSTEM,
+  tokenManager: DelegationTokenManager = null,
+  apiVersionManager: ApiVersionManager = null,
+  clientMetricsManager: Option[ClientMetricsManager] = None
+) extends ApiRequestHandlerBuilder {
+
+  override def withRequestChannel(requestChannel: RequestChannel): KafkaApisBuilder = copy(requestChannel = requestChannel)
+  def withMetadataSupport(metadataSupport: MetadataSupport): KafkaApisBuilder = copy(metadataSupport = metadataSupport)
+  def withReplicaManager(replicaManager: ReplicaManager): KafkaApisBuilder = copy(replicaManager = replicaManager)
+  def withGroupCoordinator(groupCoordinator: GroupCoordinator): KafkaApisBuilder = copy(groupCoordinator = groupCoordinator)
+  def withTxnCoordinator(txnCoordinator: TransactionCoordinator): KafkaApisBuilder = copy(txnCoordinator = txnCoordinator)
+  def withAutoTopicCreationManager(autoTopicCreationManager: AutoTopicCreationManager): KafkaApisBuilder = copy(autoTopicCreationManager = autoTopicCreationManager)
+  def withBrokerId(brokerId: Int): KafkaApisBuilder = copy(brokerId = brokerId)
+  def withConfig(config: KafkaConfig): KafkaApisBuilder = copy(config = config)
+  def withConfigRepository(configRepository: ConfigRepository): KafkaApisBuilder = copy(configRepository = configRepository)
+  def withMetadataCache(metadataCache: MetadataCache): KafkaApisBuilder = copy(metadataCache = metadataCache)
+  def withMetrics(metrics: Metrics): KafkaApisBuilder = copy(metrics = metrics)
+  def withAuthorizer(authorizer: Option[Authorizer]): KafkaApisBuilder = copy(authorizer = authorizer)
+  def withQuotas(quotas: QuotaFactory.QuotaManagers): KafkaApisBuilder = copy(quotas = quotas)
+  def withFetchManager(fetchManager: FetchManager): KafkaApisBuilder = copy(fetchManager = fetchManager)
+  def withBrokerTopicStats(brokerTopicStats: BrokerTopicStats): KafkaApisBuilder = copy(brokerTopicStats = brokerTopicStats)
+  def withClusterId(clusterId: String): KafkaApisBuilder = copy(clusterId = clusterId)
+  def withTime(time: Time): KafkaApisBuilder = copy(time = time)
+  def withTokenManager(tokenManager: DelegationTokenManager): KafkaApisBuilder = copy(tokenManager = tokenManager)
+  def withApiVersionManager(apiVersionManager: ApiVersionManager): KafkaApisBuilder = copy(apiVersionManager = apiVersionManager)
+  def withClientMetricsManager(clientMetricsManager: Option[ClientMetricsManager]): KafkaApisBuilder = copy(clientMetricsManager = clientMetricsManager)
+
+  override def build(): KafkaApis = {
+    if (requestChannel == null) throw new RuntimeException("you must set requestChannel")
+    if (metadataSupport == null) throw new RuntimeException("you must set metadataSupport")
+    if (replicaManager == null) throw new RuntimeException("You must set replicaManager")
+    if (groupCoordinator == null) throw new RuntimeException("You must set groupCoordinator")
+    if (txnCoordinator == null) throw new RuntimeException("You must set txnCoordinator")
+    if (autoTopicCreationManager == null) throw new RuntimeException("You must set autoTopicCreationManager")
+    val finalConfig = if (config == null) new KafkaConfig(java.util.Collections.emptyMap) else config
+    if (configRepository == null) throw new RuntimeException("You must set configRepository")
+    if (metadataCache == null) throw new RuntimeException("You must set metadataCache")
+    if (metrics == null) throw new RuntimeException("You must set metrics")
+    if (quotas == null) throw new RuntimeException("You must set quotas")
+    if (fetchManager == null) throw new RuntimeException("You must set fetchManager")
+    val finalBrokerTopicStats = if (brokerTopicStats == null) new BrokerTopicStats(finalConfig.remoteLogManagerConfig.isRemoteStorageSystemEnabled) else brokerTopicStats
+    if (tokenManager == null) throw new RuntimeException("You must set tokenManager")
+    if (apiVersionManager == null) throw new RuntimeException("You must set apiVersionManager")
+
+    new KafkaApis(
+      requestChannel,
+      metadataSupport,
+      replicaManager,
+      groupCoordinator,
+      txnCoordinator,
+      autoTopicCreationManager,
+      brokerId,
+      finalConfig,
+      configRepository,
+      metadataCache,
+      metrics,
+      authorizer,
+      quotas,
+      fetchManager,
+      finalBrokerTopicStats,
+      clusterId,
+      time,
+      tokenManager,
+      apiVersionManager,
+      clientMetricsManager
+    )
+  }
+}

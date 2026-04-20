@@ -90,4 +90,9 @@ public interface TransportLayer extends ScatteringByteChannel, TransferableChann
      * which may be processed without reading additional data from the network.
      */
     boolean hasBytesBuffered();
+
+    /**
+     * Update the selection key.
+     */
+    void updateSelectionKey(SelectionKey key);
 }
