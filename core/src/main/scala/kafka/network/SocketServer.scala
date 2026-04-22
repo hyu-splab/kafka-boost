@@ -464,12 +464,12 @@ private class ReassignRoutesToDedicatedP(endPoint: EndPoint,
                                          credentialProvider: CredentialProvider,
                                          logContext: LogContext,
                                          memoryPool: MemoryPool,
-                                         apiVersionManager: ApiVersionManager
+                                         apiVersionManager: ApiVersionManager,
+                                         idGenerator: () => Int
   ) extends ReassignRoutes {
 
   private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
 
-  private val nextProcessorId: AtomicInteger = new AtomicInteger(0)
   private val channelReassignMap = new ConcurrentHashMap[String, Option[Processor]]()
 
   def addTargets(clientId: String): Unit = {
@@ -503,7 +503,7 @@ private class ReassignRoutesToDedicatedP(endPoint: EndPoint,
   }
 
   private def newDedicatedProcessor(reassignRoutes: ReassignRoutes): Processor = {
-    val id = nextProcessorId.getAndIncrement()
+    val id = idGenerator()
     val name = s"kafka-dedicated-thread-$nodeId-${endPoint.listenerName}-${endPoint.securityProtocol}-$id"
     val newProcessor = createDedicatedProcessor(id,
                              time,
@@ -716,7 +716,7 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
 
   private val reassignRoutesForBoosting: ReassignRoutesToDedicatedP = new ReassignRoutesToDedicatedP(
     endPoint, config, nodeId, connectionQuotas, time, isPrivilegedListener, metrics,
-    credentialProvider, logContext, memoryPool, apiVersionManager)
+    credentialProvider, logContext, memoryPool, apiVersionManager, () => socketServer.nextProcessorId())
 
   private[network] val processors = new ArrayBuffer[Processor]()
   // Build the metric name explicitly in order to keep the existing name for compatibility
