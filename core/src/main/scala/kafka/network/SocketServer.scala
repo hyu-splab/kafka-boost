@@ -1394,7 +1394,7 @@ private[kafka] class Processor private[network] (
                   channel.principal, listenerName, securityProtocol, channel.channelMetadataRegistry.clientInformation,
                   isPrivilegedListener, channel.principalSerde)
 
-                req = new RequestChannel.Request(processor = id, context = context,
+                req = new RequestChannel.Request(initialProcessor = id, context = context,
                   startTimeNanos = nowNanos, memoryPool, receive.payload, requestChannel.metrics, None)
 
                 // KIP-511: ApiVersionsRequest is intercepted here to catch the client software name
@@ -1556,6 +1556,8 @@ private[kafka] class Processor private[network] (
    */
   def register(kafkaChannel: KafkaChannel, req: RequestChannel.Request): Boolean = {
     reassignedChannels.put(kafkaChannel)
+
+    req.setProcessor(this.id)
     reassignedRequests.put(kafkaChannel.id(), req)
     true
   }
