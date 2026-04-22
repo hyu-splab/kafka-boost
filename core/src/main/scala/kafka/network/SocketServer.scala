@@ -1357,16 +1357,15 @@ private[kafka] class Processor private[network] (
   }
 
   private def processCompletedReceives(): Unit = {
-    val iterator = reassignedRequests.entrySet().iterator()
-    while (iterator.hasNext) {
-      val entry = iterator.next()
+    reassignedRequests.forEach { (channelId, request) =>
       try {
-        requestChannel.sendRequest(entry.getValue)
+        if (openOrClosingChannel(channelId).isDefined) {
+          requestChannel.sendRequest(request)
+          reassignedRequests.remove(channelId)
+        }
       } catch {
-        case e: Throwable =>
-          processChannelException(entry.getKey, s"Exception while processing request from ${entry.getKey}", e)
-      } finally {
-        iterator.remove()
+        case e: Throwable => processChannelException(channelId, s"Exception while processing request from $channelId", e)
+        reassignedRequests.remove(channelId)
       }
     }
 
@@ -1582,7 +1581,9 @@ private[kafka] class Processor private[network] (
       } catch {
         // We explicitly catch all exceptions and close the socket to avoid a socket leak.
         case e: Throwable =>
-          // need to close the channel here to avoid a socket leak.
+          // need to close the channel and clear the request here to avoid a socket leak.
+          val remainRequest = reassignedRequests.remove(channel.id())
+          if (remainRequest != null) remainRequest.releaseBuffer()
           connectionQuotas.closeChannel(this, listenerName, channel)
           processException(s"Processor $id closed connection from ${channel.socketAddress()}:${channel.socketPort()}", e)
       }
