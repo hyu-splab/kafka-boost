@@ -376,6 +376,8 @@ public class Selector implements Selectable, AutoCloseable {
 
     public void reregister(KafkaChannel channel) throws IOException {
         channel.reregisterSelector(nioSelector);
+        this.channels.put(channel.id(), channel);
+        if (idleExpiryManager != null) idleExpiryManager.update(channel.id(), time.nanoseconds());
     }
 
     /**
