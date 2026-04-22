@@ -505,7 +505,7 @@ private class ReassignRoutesToDedicatedP(endPoint: EndPoint,
   private def newDedicatedProcessor(reassignRoutes: ReassignRoutes): Processor = {
     val id = nextProcessorId.getAndIncrement()
     val name = s"kafka-dedicated-thread-$nodeId-${endPoint.listenerName}-${endPoint.securityProtocol}-$id"
-    createDedicatedProcessor(id,
+    val newProcessor = createDedicatedProcessor(id,
                              time,
                              config.socketRequestMaxBytes,
                              connectionQuotas,
@@ -524,6 +524,8 @@ private class ReassignRoutesToDedicatedP(endPoint: EndPoint,
                              name,
                              reassignRoutes,
                              apiRequestHandlerBuilder)
+    newProcessor.start()
+    newProcessor
   }
 }
 
@@ -1063,11 +1065,13 @@ private[kafka] object Processor {
     threadName: String,
     channelReassignRoutes: ReassignRoutes,
     apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]
-  ): Processor =
-    new Processor(id,
+  ): Processor = {
+    val requestChannel = new RequestChannel(20, s"dedicatedProcessor$id-", time, apiVersionManager.newRequestMetrics)
+    val newProcessor = new Processor(
+      id,
       time,
       maxRequestSize,
-      new RequestChannel(20, s"dedicatedProcessor$id-", time, apiVersionManager.newRequestMetrics),
+      requestChannel,
       connectionQuotas,
       connectionsMaxIdleMs,
       failedAuthenticationDelayMs,
@@ -1083,7 +1087,11 @@ private[kafka] object Processor {
       apiVersionManager,
       threadName,
       channelReassignRoutes,
-      apiRequestHandlerBuilder)
+      apiRequestHandlerBuilder
+    )
+    requestChannel.addProcessor(newProcessor)
+    newProcessor
+  }
 }
 
 /**
@@ -1562,7 +1570,7 @@ private[kafka] class Processor private[network] (
     while (connectionsProcessed < connectionQueueSize && !reassignedChannels.isEmpty) {
       val channel = reassignedChannels.poll()
       try {
-        debug(s"Processor $id listening to connection from ${channel.socketAddress()}:${channel.socketPort()}")
+        debug(s"Connection ${channel.id()} reassigned to Processor $id")
         selector.reregister(channel)
         if (reassignedRequests.containsKey(channel.id())) {
           selector.mute(channel.id())
