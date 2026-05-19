@@ -26,6 +26,7 @@ import java.util.Optional
 import java.util.concurrent._
 import java.util.concurrent.atomic._
 import kafka.cluster.{BrokerEndPoint, EndPoint}
+import kafka.interceptor.{ProcessorInterceptors, IProcessorInterceptorBuilder}
 import kafka.network.Processor._
 import kafka.network.RequestChannel.{CloseConnectionResponse, EndThrottlingResponse, NoOpResponse, SendResponse, StartThrottlingResponse}
 import kafka.network.SocketServer._
@@ -79,7 +80,8 @@ class SocketServer(val config: KafkaConfig,
                    val metrics: Metrics,
                    val time: Time,
                    val credentialProvider: CredentialProvider,
-                   val apiVersionManager: ApiVersionManager)
+                   val apiVersionManager: ApiVersionManager,
+                   val processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder])
   extends Logging with BrokerReconfigurable {
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -275,11 +277,11 @@ class SocketServer(val config: KafkaConfig,
   private def endpoints = config.listeners.map(l => l.listenerName -> l).toMap
 
   protected def createDataPlaneAcceptor(endPoint: EndPoint, isPrivilegedListener: Boolean, requestChannel: RequestChannel): DataPlaneAcceptor = {
-    new DataPlaneAcceptor(this, endPoint, config, nodeId, connectionQuotas, time, isPrivilegedListener, requestChannel, metrics, credentialProvider, logContext, memoryPool, apiVersionManager)
+    new DataPlaneAcceptor(this, endPoint, config, nodeId, connectionQuotas, time, isPrivilegedListener, requestChannel, metrics, credentialProvider, logContext, memoryPool, apiVersionManager, processorInterceptorBuilders)
   }
 
   private def createControlPlaneAcceptor(endPoint: EndPoint, requestChannel: RequestChannel): ControlPlaneAcceptor = {
-    new ControlPlaneAcceptor(this, endPoint, config, nodeId, connectionQuotas, time, requestChannel, metrics, credentialProvider, logContext, memoryPool, apiVersionManager)
+    new ControlPlaneAcceptor(this, endPoint, config, nodeId, connectionQuotas, time, requestChannel, metrics, credentialProvider, logContext, memoryPool, apiVersionManager, processorInterceptorBuilders)
   }
 
   /**
@@ -440,7 +442,8 @@ private[network] class ClientBoostManager(listenerName: ListenerName,
                                           logContext: LogContext,
                                           memoryPool: MemoryPool,
                                           apiVersionManager: ApiVersionManager,
-                                          idGenerator: () => Int) extends Logging {
+                                          idGenerator: () => Int,
+                                          processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder]) extends Logging {
 
   private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
 
@@ -500,7 +503,8 @@ private[network] class ClientBoostManager(listenerName: ListenerName,
       apiVersionManager,
       name,
       None,
-      apiRequestHandlerBuilder
+      apiRequestHandlerBuilder,
+      processorInterceptorBuilders
     )
     dedicatedRequestChannel.addProcessor(processor)
     DedicatedProcessor(processor, dedicatedRequestChannel)
@@ -525,7 +529,8 @@ class DataPlaneAcceptor(socketServer: SocketServer,
                         credentialProvider: CredentialProvider,
                         logContext: LogContext,
                         memoryPool: MemoryPool,
-                        apiVersionManager: ApiVersionManager)
+                        apiVersionManager: ApiVersionManager,
+                        processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder])
   extends Acceptor(socketServer,
                    endPoint,
                    config,
@@ -538,7 +543,8 @@ class DataPlaneAcceptor(socketServer: SocketServer,
                    credentialProvider,
                    logContext,
                    memoryPool,
-                   apiVersionManager) with ListenerReconfigurable {
+                   apiVersionManager,
+                   processorInterceptorBuilders) with ListenerReconfigurable {
 
   override def metricPrefix(): String = DataPlaneAcceptor.MetricPrefix
   override def threadPrefix(): String = DataPlaneAcceptor.ThreadPrefix
@@ -639,7 +645,8 @@ class ControlPlaneAcceptor(socketServer: SocketServer,
                            credentialProvider: CredentialProvider,
                            logContext: LogContext,
                            memoryPool: MemoryPool,
-                           apiVersionManager: ApiVersionManager)
+                           apiVersionManager: ApiVersionManager,
+                           processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder])
   extends Acceptor(socketServer,
                    endPoint,
                    config,
@@ -652,7 +659,8 @@ class ControlPlaneAcceptor(socketServer: SocketServer,
                    credentialProvider,
                    logContext,
                    memoryPool,
-                   apiVersionManager) {
+                   apiVersionManager,
+                   processorInterceptorBuilders) {
 
   override def metricPrefix(): String = ControlPlaneAcceptor.MetricPrefix
   override def threadPrefix(): String = ControlPlaneAcceptor.ThreadPrefix
@@ -674,7 +682,8 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
                                        credentialProvider: CredentialProvider,
                                        logContext: LogContext,
                                        memoryPool: MemoryPool,
-                                       apiVersionManager: ApiVersionManager)
+                                       apiVersionManager: ApiVersionManager,
+                                       processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder])
   extends Runnable with Logging {
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -717,6 +726,7 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
     memoryPool,
     apiVersionManager,
     () => socketServer.nextProcessorId(),
+    processorInterceptorBuilders
   )
 
   private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
@@ -1032,7 +1042,8 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
       apiVersionManager,
       name,
       Some(clientBoostManager),
-      None
+      None,
+      processorInterceptorBuilders
     )
   }
 
@@ -1059,7 +1070,8 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
       apiVersionManager,
       name,
       None,
-      apiRequestHandlerBuilder
+      apiRequestHandlerBuilder,
+      processorInterceptorBuilders
     )
     dedicatedRequestChannel.addProcessor(processor)
     DedicatedProcessor(processor, dedicatedRequestChannel)
@@ -1110,13 +1122,16 @@ private[kafka] class Processor(val id: Int,
                                apiVersionManager: ApiVersionManager,
                                threadName: String,
                                maybeClientBoostManager: Option[ClientBoostManager],
-                               maybeRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]) extends Runnable with Logging {
+                               maybeRequestHandlerBuilder: Option[ApiRequestHandlerBuilder],
+                               interceptorBuilders: Vector[IProcessorInterceptorBuilder]) extends Runnable with Logging {
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
 
   val shouldRun: AtomicBoolean = new AtomicBoolean(true)
   private val started: AtomicBoolean = new AtomicBoolean()
 
   val thread: KafkaThread = KafkaThread.nonDaemon(threadName, this)
+
+  private val interceptors = new ProcessorInterceptors(interceptorBuilders.map(_.build(this)))
 
   private object ConnectionId {
     def fromString(s: String): Option[ConnectionId] = s.split("-") match {
@@ -1209,7 +1224,9 @@ private[kafka] class Processor(val id: Int,
       true,
       channelBuilder,
       memoryPool,
-      logContext)
+      logContext,
+      interceptors
+    )
   }
 
   // Connection ids have the format `localAddr:localPort-remoteAddr:remotePort-index`. The index is a
@@ -1223,6 +1240,7 @@ private[kafka] class Processor(val id: Int,
       while (shouldRun.get()) {
         try {
           // setup any new connections that have been queued up
+          interceptors.beforeEveryProcessorCycle(this)
           configureNewConnections()
           configureReConnections()
           // register any new responses for writing
@@ -1289,6 +1307,7 @@ private[kafka] class Processor(val id: Int,
     var currentResponse: RequestChannel.Response = null
     while ({currentResponse = dequeueResponse(); currentResponse != null}) {
       val channelId = currentResponse.request.context.connectionId
+      interceptors.beforeProcessResponse(currentResponse)
       try {
         currentResponse match {
           case response: NoOpResponse =>
@@ -1449,6 +1468,7 @@ private[kafka] class Processor(val id: Int,
                   .flatMap(_.getOrCreateDedicatedProcessorIfNeeded(req.header.clientId))
                   .foreach(destProcessor => reserveReassign(channel, destProcessor))
                 if (!reassignChannelIfNeeded(channel, req)) {
+                  interceptors.beforeSendRequestToQueue(req)
                   requestChannel.sendRequest(req)
                   selector.mute(connectionId)
                   handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
@@ -1490,6 +1510,7 @@ private[kafka] class Processor(val id: Int,
         // delay has already passed by now.
         handleChannelMuteEvent(send.destinationId, ChannelMuteEvent.RESPONSE_SENT)
         tryUnmuteChannel(send.destinationId)
+        interceptors.afterProcessResponse(response)
         if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
           updateCumulativeProcessedRequests(send.destinationId)
           addLastCycleUnmutedChannels(send.destinationId)
@@ -1612,6 +1633,7 @@ private[kafka] class Processor(val id: Int,
       val channel = newConnections.poll()
       try {
         debug(s"Processor $id listening to new connection from ${channel.socket.getRemoteSocketAddress}")
+        interceptors.beforeRegisterNewChannel(channel, this)
         selector.register(connectionId(channel.socket), channel)
         connectionsProcessed += 1
       } catch {

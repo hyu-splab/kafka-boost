@@ -94,7 +94,7 @@ class SocketServerTest {
 
   @BeforeEach
   def setUp(): Unit = {
-    server = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager)
+    server = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     server.enableRequestProcessing(Map.empty).get(1, TimeUnit.MINUTES)
     // Run the tests with TRACE logging to exercise request logging path
     logLevelToRestore = kafkaLogger.getLevel
@@ -530,7 +530,7 @@ class SocketServerTest {
     props.put(SocketServerConfigs.CONNECTIONS_MAX_IDLE_MS_CONFIG, idleTimeMs.toString)
     val serverMetrics = new Metrics
     val overrideServer = new SocketServer(KafkaConfig.fromProps(props), serverMetrics,
-      time, credentialProvider, apiVersionManager)
+      time, credentialProvider, apiVersionManager, Vector.empty)
 
     try {
       overrideServer.enableRequestProcessing(Map.empty).get(1, TimeUnit.MINUTES)
@@ -868,7 +868,7 @@ class SocketServerTest {
     newProps.setProperty(SocketServerConfigs.MAX_CONNECTIONS_PER_IP_CONFIG, "0")
     newProps.setProperty(SocketServerConfigs.MAX_CONNECTIONS_PER_IP_OVERRIDES_CONFIG, "%s:%s".format("127.0.0.1", "5"))
     val server = new SocketServer(KafkaConfig.fromProps(newProps), new Metrics(),
-      Time.SYSTEM, credentialProvider, apiVersionManager)
+      Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     try {
       server.enableRequestProcessing(Map.empty).get(1, TimeUnit.MINUTES)
       // make the maximum allowable number of connections
@@ -907,7 +907,7 @@ class SocketServerTest {
     overrideProps.put(SocketServerConfigs.MAX_CONNECTIONS_PER_IP_OVERRIDES_CONFIG, s"localhost:$overrideNum")
     val serverMetrics = new Metrics()
     val overrideServer = new SocketServer(KafkaConfig.fromProps(overrideProps), serverMetrics,
-      Time.SYSTEM, credentialProvider, apiVersionManager)
+      Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     try {
       overrideServer.enableRequestProcessing(Map.empty).get(1, TimeUnit.MINUTES)
       // make the maximum allowable number of connections
@@ -933,13 +933,13 @@ class SocketServerTest {
     val serverMetrics = new Metrics()
 
     val overrideServer = new SocketServer(KafkaConfig.fromProps(props), serverMetrics,
-      Time.SYSTEM, credentialProvider, apiVersionManager) {
+      Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty) {
 
       // same as SocketServer.createAcceptor,
       // except the Acceptor overriding a method to inject the exception
       override protected def createDataPlaneAcceptor(endPoint: EndPoint, isPrivilegedListener: Boolean, requestChannel: RequestChannel): DataPlaneAcceptor = {
 
-        new DataPlaneAcceptor(this, endPoint, this.config, nodeId, connectionQuotas, time, false, requestChannel, serverMetrics, this.credentialProvider, new LogContext(), MemoryPool.NONE, this.apiVersionManager) {
+        new DataPlaneAcceptor(this, endPoint, this.config, nodeId, connectionQuotas, time, false, requestChannel, serverMetrics, this.credentialProvider, new LogContext(), MemoryPool.NONE, this.apiVersionManager, Vector.empty) {
           override protected def configureAcceptedSocketChannel(socketChannel: SocketChannel): Unit = {
             assertEquals(1, connectionQuotas.get(socketChannel.socket.getInetAddress))
             throw new IOException("test injected IOException")
@@ -968,7 +968,7 @@ class SocketServerTest {
     val connectionRate = 5
     val time = new MockTime()
     val overrideServer = new SocketServer(KafkaConfig.fromProps(overrideProps), new Metrics(),
-      time, credentialProvider, apiVersionManager)
+      time, credentialProvider, apiVersionManager, Vector.empty)
     // update the connection rate to 5
     overrideServer.connectionQuotas.updateIpConnectionRateQuota(None, Some(connectionRate))
     try {
@@ -1019,7 +1019,7 @@ class SocketServerTest {
     val connectionRate = 5
     val time = new MockTime()
     val overrideServer = new SocketServer(KafkaConfig.fromProps(overrideProps), new Metrics(),
-      time, credentialProvider, apiVersionManager)
+      time, credentialProvider, apiVersionManager, Vector.empty)
     overrideServer.connectionQuotas.updateIpConnectionRateQuota(None, Some(connectionRate))
     overrideServer.enableRequestProcessing(Map.empty).get(1, TimeUnit.MINUTES)
     // make the maximum allowable number of connections
@@ -1042,7 +1042,7 @@ class SocketServerTest {
   def testSslSocketServer(): Unit = {
     val serverMetrics = new Metrics
     val overrideServer = new SocketServer(KafkaConfig.fromProps(sslServerProps), serverMetrics,
-      Time.SYSTEM, credentialProvider, apiVersionManager)
+      Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     try {
       overrideServer.enableRequestProcessing(Map.empty).get(1, TimeUnit.MINUTES)
       val sslContext = SSLContext.getInstance(TestSslUtils.DEFAULT_TLS_PROTOCOL_FOR_TESTS)
@@ -1252,7 +1252,7 @@ class SocketServerTest {
     val serverMetrics = new Metrics
     var conn: Socket = null
     val overrideServer = new SocketServer(KafkaConfig.fromProps(props), serverMetrics,
-      Time.SYSTEM, credentialProvider, apiVersionManager)
+      Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     try {
       overrideServer.enableRequestProcessing(Map.empty).get(1, TimeUnit.MINUTES)
       conn = connect(overrideServer)
@@ -1997,7 +1997,7 @@ class SocketServerTest {
   @Test
   def testAuthorizerFailureCausesEnableRequestProcessingFailure(): Unit = {
     shutdownServerAndMetrics(server)
-    val newServer = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager)
+    val newServer = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     try {
       val failedFuture = new CompletableFuture[Void]()
       failedFuture.completeExceptionally(new RuntimeException("authorizer startup failed"))
@@ -2012,7 +2012,7 @@ class SocketServerTest {
   @Test
   def testFailedAcceptorStartupCausesEnableRequestProcessingFailure(): Unit = {
     shutdownServerAndMetrics(server)
-    val newServer = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager)
+    val newServer = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     try {
       newServer.dataPlaneAcceptors.values().forEach(a => a.shouldRun.set(false))
       assertThrows(classOf[ExecutionException], () => {
@@ -2026,7 +2026,7 @@ class SocketServerTest {
   @Test
   def testAcceptorStartOpensPortIfNeeded(): Unit = {
     shutdownServerAndMetrics(server)
-    val newServer = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager)
+    val newServer = new SocketServer(config, metrics, Time.SYSTEM, credentialProvider, apiVersionManager, Vector.empty)
     try {
       newServer.dataPlaneAcceptors.values().forEach(a => {
         a.serverChannel.close()
@@ -2144,7 +2144,8 @@ class SocketServerTest {
                                                                              credentialProvider,
                                                                              logContext,
                                                                              memoryPool,
-                                                                             apiVersionManager) {
+                                                                             apiVersionManager,
+                                                                             Vector.empty) {
 
     private val clientBoostManager = new ClientBoostManager(
       endPoint.listenerName,
@@ -2158,7 +2159,8 @@ class SocketServerTest {
       logContext,
       memoryPool,
       apiVersionManager,
-      () => 0
+      () => 0,
+      Vector.empty
     )
 
     override def newProcessor(id: Int, listenerName: ListenerName, securityProtocol: SecurityProtocol): Processor = {
@@ -2188,7 +2190,8 @@ class SocketServerTest {
                     apiVersionManager,
                     s"TestableProcessor$id",
                     maybeClientBoostManager,
-                    None) {
+                    None,
+                    Vector.empty) {
     private var connectionId: Option[String] = None
     private var conn: Option[Socket] = None
 
@@ -2225,7 +2228,7 @@ class SocketServerTest {
     connectionQueueSize: Int = 20,
     time: Time = Time.SYSTEM
   ) extends SocketServer(
-    config, new Metrics, time, credentialProvider, apiVersionManager,
+    config, new Metrics, time, credentialProvider, apiVersionManager, Vector.empty
   ) {
 
     override def createDataPlaneAcceptor(endPoint: EndPoint, isPrivilegedListener: Boolean, requestChannel: RequestChannel) : DataPlaneAcceptor = {

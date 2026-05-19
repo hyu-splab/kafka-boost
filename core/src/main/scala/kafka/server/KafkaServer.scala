@@ -22,6 +22,7 @@ import kafka.common.GenerateBrokerIdException
 import kafka.controller.KafkaController
 import kafka.coordinator.group.GroupCoordinatorAdapter
 import kafka.coordinator.transaction.{ProducerIdManager, TransactionCoordinator}
+import kafka.interceptor.{IProcessorInterceptorBuilder, LogProduceRequestStatInterceptorBuilder}
 import kafka.log.LogManager
 import kafka.log.remote.RemoteLogManager
 import kafka.metrics.KafkaMetricsReporter
@@ -380,7 +381,10 @@ class KafkaServer(
         //
         // Note that we allow the use of KRaft mode controller APIs when forwarding is enabled
         // so that the Envelope request is exposed. This is only used in testing currently.
-        socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager)
+        val processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder] = Vector(
+          new LogProduceRequestStatInterceptorBuilder(time)
+        )
+        socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager, processorInterceptorBuilders)
 
         // Start alter partition manager based on the IBP version
         alterPartitionManager = if (config.interBrokerProtocolVersion.isAlterPartitionSupported) {

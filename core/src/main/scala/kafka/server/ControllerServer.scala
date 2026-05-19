@@ -17,6 +17,7 @@
 
 package kafka.server
 
+import kafka.interceptor.{IProcessorInterceptorBuilder, LogProduceRequestStatInterceptorBuilder}
 import kafka.migration.MigrationPropagator
 import kafka.network.{DataPlaneAcceptor, SocketServer}
 import kafka.raft.KafkaRaftManager
@@ -184,11 +185,15 @@ class ControllerServer(
 
       tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames)
       credentialProvider = new CredentialProvider(ScramMechanism.mechanismNames, tokenCache)
+      val processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder] = Vector(
+        new LogProduceRequestStatInterceptorBuilder(time)
+      )
       socketServer = new SocketServer(config,
         metrics,
         time,
         credentialProvider,
-        apiVersionManager)
+        apiVersionManager,
+        processorInterceptorBuilders)
 
       val listenerInfo = ListenerInfo
         .create(config.effectiveAdvertisedControllerListeners.map(_.toJava).asJava)
