@@ -280,7 +280,8 @@ public class Selector implements Selectable, AutoCloseable {
         } catch (IOException | RuntimeException e) {
             if (key != null)
                 immediatelyConnectedKeys.remove(key);
-            channels.remove(id);
+            KafkaChannel removed = channels.remove(id);
+            if (removed != null) removed.setMigrating(false);
             socketChannel.close();
             throw e;
         }
@@ -954,6 +955,7 @@ public class Selector implements Selectable, AutoCloseable {
      */
     private void close(KafkaChannel channel, CloseMode closeMode) {
         channel.disconnect();
+        channel.setMigrating(false);
 
         // Ensure that `connected` does not have closed channels. This could happen if `prepare` throws an exception
         // in the `poll` invocation when `finishConnect` succeeds

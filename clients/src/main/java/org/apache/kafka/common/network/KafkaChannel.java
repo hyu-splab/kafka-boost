@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.common.network;
 
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.SslAuthenticationException;
 import org.apache.kafka.common.memory.MemoryPool;
@@ -113,6 +115,12 @@ public class KafkaChannel implements AutoCloseable {
         THROTTLE_ENDED
     }
 
+    public enum ChannelLoadState {
+        INIT,
+        IDLE,
+        SATURATED,
+    }
+
     private final String id;
     private final TransportLayer transportLayer;
     private final Supplier<Authenticator> authenticatorCreator;
@@ -135,6 +143,9 @@ public class KafkaChannel implements AutoCloseable {
     private boolean midWrite;
     private long lastReauthenticationStartNanos;
 
+    private final LongAdder cumulativeProcessedRequests = new LongAdder();
+    private final AtomicReference<ChannelLoadState> loadState = new AtomicReference<>(ChannelLoadState.INIT);
+
     private volatile boolean isMigrating = false;
     private volatile String lastClientId = "";
 
@@ -156,6 +167,26 @@ public class KafkaChannel implements AutoCloseable {
     public void close() throws IOException {
         this.disconnected = true;
         Utils.closeAll(transportLayer, authenticator, receive, metadataRegistry);
+    }
+
+    public long getCumulativeProcessedRequests() {
+        return cumulativeProcessedRequests.sum();
+    }
+
+    public void inclCumulativeProcessedRequests() {
+        cumulativeProcessedRequests.add(1);
+    }
+
+    public void markSaturated() {
+        loadState.set(ChannelLoadState.SATURATED);
+    }
+
+    public void markIdle() {
+        this.loadState.set(ChannelLoadState.IDLE);
+    }
+
+    public ChannelLoadState getLoadStateAndReset() {
+        return this.loadState.getAndSet(ChannelLoadState.INIT);
     }
 
     public void setMigrating(boolean migrating) {

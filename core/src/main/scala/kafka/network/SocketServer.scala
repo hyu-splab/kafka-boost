@@ -592,6 +592,7 @@ class DataPlaneAcceptor(socketServer: SocketServer,
    */
   override def reconfigure(configs: util.Map[String, _]): Unit = {
     val newNumNetworkThreads = configs.get(SocketServerConfigs.NUM_NETWORK_THREADS_CONFIG).asInstanceOf[Int]
+    val newNumDedicatedThreads = configs.get(SocketServerConfigs.NUM_DEDICATED_THREADS_CONFIG).asInstanceOf[Int]
 
     if (newNumNetworkThreads != processors.length) {
       info(s"Resizing network thread pool size for ${endPoint.listenerName} listener from ${processors.length} to $newNumNetworkThreads")
@@ -601,6 +602,16 @@ class DataPlaneAcceptor(socketServer: SocketServer,
         removeProcessors(processors.length - newNumNetworkThreads)
       }
     }
+
+    val dedicatedProcessorCount = dynamicChannelBoostManager.dedicatedProcessorsCount
+    if (newNumDedicatedThreads != dedicatedProcessorCount) {
+      info(s"Resizing dedicated thread pool size for ${endPoint.listenerName} listener from $dedicatedProcessorCount to $newNumDedicatedThreads")
+      if (newNumDedicatedThreads > dedicatedProcessorCount) {
+        addDedicatedProcessors(newNumDedicatedThreads - dedicatedProcessorCount)
+      } else if (newNumDedicatedThreads < dedicatedProcessorCount) {
+        dynamicChannelBoostManager.removeDedicatedProcessors(dedicatedProcessorCount - newNumDedicatedThreads)
+      }
+    }
   }
 
   /**
@@ -608,6 +619,7 @@ class DataPlaneAcceptor(socketServer: SocketServer,
    */
   override def configure(configs: util.Map[String, _]): Unit = {
     addProcessors(configs.get(SocketServerConfigs.NUM_NETWORK_THREADS_CONFIG).asInstanceOf[Int])
+    addDedicatedProcessors(configs.get(SocketServerConfigs.NUM_DEDICATED_THREADS_CONFIG).asInstanceOf[Int])
   }
 }
 
@@ -707,6 +719,19 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
     () => socketServer.nextProcessorId(),
   )
 
+  private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
+  private[network] val dynamicChannelBoostManager: DynamicChannelBoostManager = new DynamicChannelBoostManager(
+    endPoint,
+    time,
+    config.boosterCheckIntervalMs,
+    config.boosterNewChannelCooldownTicks,
+    config.boosterAssignCooldownTicks,
+    config.boosterReturnCooldownTicks,
+    config.boosterSaturationWindowSize,
+    config.boosterIdleWindowSize,
+    config.boosterRequestsStatWindowSize
+  )
+
   private[network] val processors = new ArrayBuffer[Processor]()
   // Build the metric name explicitly in order to keep the existing name for compatibility
   private val blockedPercentMeterMetricName = KafkaMetricsGroup.explicitMetricName(
@@ -725,6 +750,8 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
     this)
 
   def setApiRequestHandlerBuilder(apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]): Unit = {
+    this.apiRequestHandlerBuilder = apiRequestHandlerBuilder
+    dynamicChannelBoostManager.setApiRequestHandler(apiRequestHandlerBuilder)
     clientBoostManager.setApiRequestHandlerBuilder(apiRequestHandlerBuilder)
   }
 
@@ -739,6 +766,7 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
       }
       debug(s"Starting processors for listener ${endPoint.listenerName}")
       processors.foreach(_.start())
+      dynamicChannelBoostManager.start()
       debug(s"Starting acceptor thread for listener ${endPoint.listenerName}")
       thread.start()
       startedFuture.complete(null)
@@ -763,6 +791,7 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
     // The processors are then removed from `requestChannel` and any pending responses to these processors are dropped.
     val toRemove = processors.takeRight(removeCount)
     processors.remove(processors.size - removeCount, removeCount)
+    dynamicChannelBoostManager.removeNetworkProcessors(toRemove)
     toRemove.foreach(_.close())
     toRemove.foreach(processor => requestChannel.removeProcessor(processor.id))
   }
@@ -962,6 +991,23 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
       }
     }
     processors ++= listenerProcessors
+    dynamicChannelBoostManager.addNetworkProcessors(listenerProcessors)
+  }
+
+  def addDedicatedProcessors(toCreate: Int): Unit = synchronized {
+    val listenerName = endPoint.listenerName
+    val securityProtocol = endPoint.securityProtocol
+    val newProcessors = new ArrayBuffer[DedicatedProcessor]()
+
+    for (_ <- 0 until toCreate) {
+      val id = socketServer.nextProcessorId()
+      val dedicatedProcessor = newDedicatedProcessor(id, listenerName, securityProtocol)
+      if (started.get) {
+        dedicatedProcessor.processor.start()
+      }
+      newProcessors.append(dedicatedProcessor)
+    }
+    dynamicChannelBoostManager.addDedicatedProcessors(newProcessors)
   }
 
   def newProcessor(id: Int, listenerName: ListenerName, securityProtocol: SecurityProtocol): Processor = {
@@ -988,6 +1034,35 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
       Some(clientBoostManager),
       None
     )
+  }
+
+  def newDedicatedProcessor(id: Int, listenerName: ListenerName, securityProtocol: SecurityProtocol): DedicatedProcessor = {
+    val name = s"kafka-dedicated-thread-$listenerName-$securityProtocol-$id"
+    val dedicatedRequestChannel = new RequestChannel(20, s"dedicatedProcessor$id-", time, apiVersionManager.newRequestMetrics)
+    val processor = new Processor(
+      id,
+      time,
+      config.socketRequestMaxBytes,
+      dedicatedRequestChannel,
+      connectionQuotas,
+      config.connectionsMaxIdleMs,
+      config.failedAuthenticationDelayMs,
+      listenerName,
+      securityProtocol,
+      config,
+      metrics,
+      credentialProvider,
+      memoryPool,
+      logContext,
+      Processor.ConnectionQueueSize,
+      isPrivilegedListener,
+      apiVersionManager,
+      name,
+      None,
+      apiRequestHandlerBuilder
+    )
+    dedicatedRequestChannel.addProcessor(processor)
+    DedicatedProcessor(processor, dedicatedRequestChannel)
   }
 }
 
@@ -1016,26 +1091,26 @@ private[kafka] object Processor {
  *                             forwarding requests; if the control plane is not defined, the processor
  *                             relying on the inter broker listener would be acting as the privileged listener.
  */
-private[kafka] class Processor private[network] (val id: Int,
-                                                 time: Time,
-                                                 maxRequestSize: Int,
-                                                 requestChannel: RequestChannel,
-                                                 connectionQuotas: ConnectionQuotas,
-                                                 connectionsMaxIdleMs: Long,
-                                                 failedAuthenticationDelayMs: Int,
-                                                 listenerName: ListenerName,
-                                                 securityProtocol: SecurityProtocol,
-                                                 config: KafkaConfig,
-                                                 metrics: Metrics,
-                                                 credentialProvider: CredentialProvider,
-                                                 memoryPool: MemoryPool,
-                                                 logContext: LogContext,
-                                                 connectionQueueSize: Int,
-                                                 isPrivilegedListener: Boolean,
-                                                 apiVersionManager: ApiVersionManager,
-                                                 threadName: String,
-                                                 maybeClientBoostManager: Option[ClientBoostManager],
-                                                 maybeRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]) extends Runnable with Logging {
+private[kafka] class Processor(val id: Int,
+                               time: Time,
+                               maxRequestSize: Int,
+                               requestChannel: RequestChannel,
+                               connectionQuotas: ConnectionQuotas,
+                               connectionsMaxIdleMs: Long,
+                               failedAuthenticationDelayMs: Int,
+                               listenerName: ListenerName,
+                               securityProtocol: SecurityProtocol,
+                               config: KafkaConfig,
+                               metrics: Metrics,
+                               credentialProvider: CredentialProvider,
+                               memoryPool: MemoryPool,
+                               logContext: LogContext,
+                               connectionQueueSize: Int,
+                               isPrivilegedListener: Boolean,
+                               apiVersionManager: ApiVersionManager,
+                               threadName: String,
+                               maybeClientBoostManager: Option[ClientBoostManager],
+                               maybeRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]) extends Runnable with Logging {
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
 
   val shouldRun: AtomicBoolean = new AtomicBoolean(true)
@@ -1141,6 +1216,7 @@ private[kafka] class Processor private[network] (val id: Int,
   // non-negative incrementing value that ensures that even if remotePort is reused after a connection is
   // closed, connection ids are not reused while requests from the closed connection are being processed.
   private var nextConnectionIndex = 0
+  private val lastCycleUnmutedChannels = new java.util.ArrayList[KafkaChannel]()
 
   override def run(): Unit = {
     try {
@@ -1164,7 +1240,9 @@ private[kafka] class Processor private[network] (val id: Int,
           // be either associated with a specific socket channel or a bad request. These exceptions are caught and
           // processed by the individual methods above which close the failing channel and continue processing other
           // channels. So this catch block should only ever see ControlThrowables.
-          case e: Throwable => processException("Processor got uncaught exception.", e)
+          case e: Throwable =>
+            clearLastCycleUnmutedChannels()
+            processException("Processor got uncaught exception.", e)
         }
       }
     } finally {
@@ -1173,11 +1251,30 @@ private[kafka] class Processor private[network] (val id: Int,
     }
   }
 
+  private def addLastCycleUnmutedChannels(channelId: String): Unit =
+    openOrClosingChannel(channelId).filter(!_.isMuted).foreach(c => {
+      if (!lastCycleUnmutedChannels.contains(c)) {
+        lastCycleUnmutedChannels.add(c)
+      }
+      c.markIdle()
+    })
+
+  private def clearLastCycleUnmutedChannels(): Unit = {
+    for (i <- 0 until lastCycleUnmutedChannels.size()) {
+      lastCycleUnmutedChannels.get(i).markIdle()
+    }
+    lastCycleUnmutedChannels.clear()
+  }
+
   private[network] def processException(errorMessage: String, throwable: Throwable): Unit = {
     throwable match {
       case e: ControlThrowable => throw e
       case e => error(errorMessage, e)
     }
+  }
+
+  private def updateCumulativeProcessedRequests(channelId: String): Unit = {
+    openOrClosingChannel(channelId).foreach(c => c.inclCumulativeProcessedRequests())
   }
 
   private def processChannelException(channelId: String, errorMessage: String, throwable: Throwable): Unit = {
@@ -1204,6 +1301,10 @@ private[kafka] class Processor private[network] (val id: Int,
             // throttling delay has already passed by now.
             handleChannelMuteEvent(channelId, ChannelMuteEvent.RESPONSE_SENT)
             tryUnmuteChannel(channelId)
+            if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
+              updateCumulativeProcessedRequests(channelId)
+              addLastCycleUnmutedChannels(channelId)
+            }
 
           case response: SendResponse =>
             sendResponse(response, response.responseSend)
@@ -1213,11 +1314,15 @@ private[kafka] class Processor private[network] (val id: Int,
             close(channelId)
           case _: StartThrottlingResponse =>
             handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_STARTED)
-          case _: EndThrottlingResponse =>
+          case response: EndThrottlingResponse =>
             // Try unmuting the channel. The channel will be unmuted only if the response has already been sent out to
             // the client.
             handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_ENDED)
             tryUnmuteChannel(channelId)
+            if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
+              updateCumulativeProcessedRequests(channelId)
+              addLastCycleUnmutedChannels(channelId)
+            }
           case _ =>
             throw new IllegalArgumentException(s"Unknown response type: ${currentResponse.getClass}")
         }
@@ -1325,6 +1430,10 @@ private[kafka] class Processor private[network] (val id: Int,
                 req = new RequestChannel.Request(initialProcessor = id, context = context,
                   startTimeNanos = nowNanos, memoryPool, receive.payload, requestChannel.metrics, None)
                 channel.setLastClientId(req.header.clientId)
+                if (req.header.apiKey() == ApiKeys.PRODUCE) {
+                  if (lastCycleUnmutedChannels.remove(channel)) channel.markSaturated()
+                  else channel.markIdle()
+                }
 
                 // KIP-511: ApiVersionsRequest is intercepted here to catch the client software name
                 // and version. It is done here to avoid wiring things up to the api layer.
@@ -1361,6 +1470,7 @@ private[kafka] class Processor private[network] (val id: Int,
       }
     }
     selector.clearCompletedReceives()
+    clearLastCycleUnmutedChannels()
   }
 
   private def processCompletedSends(): Unit = {
@@ -1380,6 +1490,10 @@ private[kafka] class Processor private[network] (val id: Int,
         // delay has already passed by now.
         handleChannelMuteEvent(send.destinationId, ChannelMuteEvent.RESPONSE_SENT)
         tryUnmuteChannel(send.destinationId)
+        if (response.request.header.apiKey() == ApiKeys.PRODUCE) {
+          updateCumulativeProcessedRequests(send.destinationId)
+          addLastCycleUnmutedChannels(send.destinationId)
+        }
       } catch {
         case e: Throwable => processChannelException(send.destinationId,
           s"Exception while processing completed send to ${send.destinationId}", e)
@@ -1452,6 +1566,16 @@ private[kafka] class Processor private[network] (val id: Int,
         iter.remove()
         request.releaseBuffer()
       }
+    }
+  }
+
+  def forEachChannels(f: KafkaChannel => Unit): Unit = {
+    selector.channels().forEach(f(_))
+
+    val iter = incomingReassignments.iterator()
+    while (iter.hasNext) {
+      val (channel, _) = iter.next()
+      f(channel)
     }
   }
 
@@ -2150,5 +2274,363 @@ class ConnectionQuotas(config: KafkaConfig, time: Time, metrics: Metrics) extend
       dec(listenerName, channel.socketAddress())
       CoreUtils.swallow(channel.close(), log, Level.ERROR)
     }
+  }
+}
+
+class DynamicChannelBoostManager(val endPoint: EndPoint,
+                                 time: Time,
+                                 tickIntervalMs: Int,
+                                 newChannelCooldownTicks: Int,
+                                 assignCooldownTicks: Int,
+                                 returnCooldownTicks: Int,
+                                 saturatedChannelDetectionWindowSize: Int,
+                                 idleChannelDetectionWindowSize: Int,
+                                 processedRequestsCountWindowSize: Int) extends Runnable with Logging {
+  private val networkProcessors = new ArrayBuffer[Processor]()
+
+  private val dedicatedProcessors = new ArrayBuffer[DedicatedProcessor]()
+  private val idleDedicatedProcessors = new mutable.LinkedHashSet[Processor]()
+
+  private val normalChannelStats = new mutable.LinkedHashMap[KafkaChannel, NormalChannelStats]()
+  private val boostedChannelStats = new mutable.LinkedHashMap[KafkaChannel, BoostedChannelStats]()
+
+  private var assignCooldownCounter = 0
+
+  val shouldRun: AtomicBoolean = new AtomicBoolean(true)
+  private val started: AtomicBoolean = new AtomicBoolean()
+
+  val thread: KafkaThread = KafkaThread.nonDaemon(
+    s"kafka-socket-boost-manager-${endPoint.listenerName}-${endPoint.securityProtocol}-${endPoint.port}",
+    this
+  )
+
+  def addNetworkProcessors(processors: Iterable[Processor]): Unit = {
+    networkProcessors ++= processors
+  }
+
+  def removeNetworkProcessors(toRemove: Iterable[Processor]): Unit = {
+    val targets: mutable.Stack[Int] = mutable.Stack[Int]()
+    for (idx <- networkProcessors.indices) {
+      if (toRemove.exists(_.id == networkProcessors(idx).id)) targets.push(idx)
+    }
+    while (targets.nonEmpty) networkProcessors.remove(targets.pop())
+    // TODO: Channels originating from these processors must be closed or migrated to a different network thread.
+  }
+
+  def dedicatedProcessorsCount: Int = dedicatedProcessors.size
+
+  def addDedicatedProcessors(processors: Iterable[DedicatedProcessor]): Unit = {
+    dedicatedProcessors ++= processors
+    idleDedicatedProcessors ++= processors.map(_.processor).toSet
+  }
+
+  def removeDedicatedProcessors(count: Int): Unit = {
+    val toRemove = dedicatedProcessors.takeRight(count)
+    dedicatedProcessors.remove(dedicatedProcessors.size - count, count)
+    toRemove.foreach { dedicatedProcessor =>
+      if (!idleDedicatedProcessors.remove(dedicatedProcessor.processor)) {
+        // TODO: Add exception handling for removal using already assigned processor or logic to migrate all channels to the network thread.
+      }
+      dedicatedProcessor.close()
+    }
+  }
+
+  def unBoostAllChannels(): Unit = {
+    // TODO: Migrate all channels to the network thread.
+  }
+
+  def setApiRequestHandler(apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]): Unit = {
+    dedicatedProcessors.foreach(_.processor.setDedicatedHandler(apiRequestHandlerBuilder))
+  }
+
+  def start(): Unit = {
+    if (!started.getAndSet(true)) {
+      dedicatedProcessors.foreach(_.processor.start())
+      thread.start()
+    }
+  }
+
+  def beginShutdown(): Unit = {
+    if (shouldRun.getAndSet(false)) {
+      synchronized {
+        dedicatedProcessors.foreach(_.processor.beginShutdown())
+      }
+    }
+  }
+
+  def close(): Unit = {
+    beginShutdown()
+    thread.join()
+    if (!started.get) {
+      closeAll()
+    }
+    synchronized {
+      dedicatedProcessors.foreach(_.close())
+    }
+  }
+
+  override def run(): Unit = {
+    var lastStatUpdatedNs = time.nanoseconds()
+    var tickCnt = 0
+    try {
+      while (shouldRun.get()) {
+        try {
+          val loopStartNs = time.nanoseconds()
+          val elapsedNs = loopStartNs - lastStatUpdatedNs
+          lastStatUpdatedNs = loopStartNs
+
+          updateNormalChannelStats(elapsedNs)
+          updateBoostedChannelStats(elapsedNs)
+          boostOneChannelIfNeeded()
+          unBoostOneChannelIfNeeded()
+
+          tickCnt += 1
+          if (assignCooldownCounter > 0) assignCooldownCounter -= 1
+          sleepToNextTick(loopStartNs)
+        } catch {
+          // We catch all the throwables to prevent the acceptor thread from exiting on exceptions due
+          // to a select operation on a specific channel or a bad request. We don't want
+          // the broker to stop responding to requests from other clients in these scenarios.
+          case e: ControlThrowable => throw e
+          case e: Throwable => error("Error occurred", e)
+        }
+      }
+    } finally {
+      closeAll()
+    }
+  }
+
+  private def unBoostOneChannelIfNeeded(): Unit = {
+    boostedChannelStats.filter { case (channel, stat) =>
+      !channel.isMigrating && stat.isFullyIdle
+    }.minByOption { case (_, stat) =>
+      stat.returnThreshold
+    }.foreach { case (channel, stat) =>
+      stat.processor.reserveReassign(channel, stat.originProcessor)
+      idleDedicatedProcessors += stat.processor
+      assignCooldownCounter = assignCooldownTicks
+      normalChannelStats.put(channel, new NormalChannelStats(stat.originProcessor, 0))
+    }
+  }
+
+  private def boostOneChannelIfNeeded(): Unit = {
+    normalChannelStats.filter { case (channel, stat) =>
+      !channel.isMigrating && stat.isFullySaturated && assignCooldownCounter <= 0
+    }.maxByOption { case (_, stat) =>
+      stat.getProcessedRequestsCountAvg
+    }.foreach { case (channel, stat) =>
+      val destProcessor = idleDedicatedProcessors.headOption
+      destProcessor.foreach(p => {
+        stat.processor.reserveReassign(channel, p)
+        boostedChannelStats.put(channel, new BoostedChannelStats(
+          p,
+          stat.processor,
+          stat.getProcessedRequestsCountAvg.toLong,
+          returnCooldownTicks
+        ))
+        idleDedicatedProcessors.remove(p)
+      })
+    }
+  }
+
+  private def updateBoostedChannelStats(elapsedNs: Long): Unit = {
+    val activeChannels = mutable.Set[KafkaChannel]()
+    dedicatedProcessors.foreach { p =>
+      p.processor.forEachChannels { c =>
+        activeChannels.add(c)
+        boostedChannelStats.get(c).foreach { stat =>
+          if (stat.decrementCooldownCounterIfNeeded()) {
+            stat.updatePrevCumulativeProcessedRequestsCountOnly(c.getCumulativeProcessedRequests)
+          } else if (stat.isProcessedRequestsCountFullyLoaded) {
+            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
+            stat.putNewIdleFlag(stat.getProcessedRequestsCountAvg < stat.returnThreshold)
+            stat.getStatLogStringIfFullyLoaded.foreach(s => debug(s"{channel: ${c.getLastClientId}, stat:$s}"))
+          } else {
+            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
+            stat.getStatLogStringIfFullyLoaded.foreach(s => debug(s"{channel: ${c.getLastClientId}, stat:$s}"))
+          }
+        }
+      }
+    }
+    boostedChannelStats.filterInPlace((c, _) => activeChannels.contains(c) || c.isMigrating)
+  }
+
+  private def updateNormalChannelStats(elapsedNs: Long): Unit = {
+    val activeChannels = mutable.Set[KafkaChannel]()
+    networkProcessors.foreach { p =>
+      p.forEachChannels { c =>
+        activeChannels.add(c)
+        val loadState = c.getLoadStateAndReset
+        if (loadState != KafkaChannel.ChannelLoadState.INIT) normalChannelStats.getOrElseUpdate(c, new NormalChannelStats(p, newChannelCooldownTicks))
+        normalChannelStats.get(c).foreach { stat =>
+          if (stat.decrementCooldownCounterIfNeeded()) {
+            stat.updatePrevCumulativeProcessedRequestsCountOnly(c.getCumulativeProcessedRequests)
+          } else {
+            stat.putNewSaturatedFlag(loadState == KafkaChannel.ChannelLoadState.SATURATED)
+            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
+            stat.getStatLogStringIfFullyLoaded.foreach(s => debug(s"{channel: ${c.getLastClientId}, stat:$s}"))
+          }
+        }
+      }
+    }
+    normalChannelStats.filterInPlace((c, _) => activeChannels.contains(c) || c.isMigrating)
+  }
+
+  private def sleepToNextTick(startNs: Long): Unit = {
+    val elapsedMs = (time.nanoseconds() - startNs) / 1_000_000
+    val remainedMs = tickIntervalMs - elapsedMs
+    if (remainedMs > 0) Thread.sleep(remainedMs)
+  }
+
+  private def closeAll(): Unit = {
+    debug("Closing Boost Manager.")
+  }
+
+  private class NormalChannelStats(val processor: Processor, cooldownTick: Int) {
+    private val saturatedFlagWindow = new CircularStatWindow(saturatedChannelDetectionWindowSize)
+    private val processedRequestsCountWindow = new CircularStatWindow(processedRequestsCountWindowSize)
+    private var prevCumulativeProcessedRequestsCount: Option[Long] = None
+    private var cooldownCounter: Int = cooldownTick
+
+    private var tick = processedRequestsCountWindowSize
+
+    def isFullySaturated: Boolean = saturatedFlagWindow.sum >= saturatedChannelDetectionWindowSize
+    def putNewSaturatedFlag(newFlag: Boolean): Unit = saturatedFlagWindow.put(if (newFlag) 1 else 0)
+
+
+    def getProcessedRequestsCountAvg: Double = processedRequestsCountWindow.avg
+    def putNewCumulativeProcessedRequestsCount(newCPR: Long, elapsedMs: Long): Unit = {
+      prevCumulativeProcessedRequestsCount.foreach(prev => processedRequestsCountWindow.put(newCPR - prev, elapsedMs))
+      prevCumulativeProcessedRequestsCount = Some(newCPR)
+      tick += 1
+    }
+    def updatePrevCumulativeProcessedRequestsCountOnly(newCPR: Long): Unit = prevCumulativeProcessedRequestsCount = Some(newCPR)
+
+    def decrementCooldownCounterIfNeeded(): Boolean = {
+      if (cooldownCounter > 0) {
+        cooldownCounter -= 1
+        return true
+      }
+      false
+    }
+
+    def getStatLogStringIfFullyLoaded: Option[String] = {
+      if (tick < processedRequestsCountWindowSize) return None
+      tick = 0
+      Some(toString)
+    }
+
+    override def toString: String = {
+      s"{" +
+        s"processorId: ${processor.id}, " +
+        s"cooldownCounter: $cooldownCounter, " +
+        s"saturatedFlagSum: ${saturatedFlagWindow.sum}, " +
+        f"processedRequestsCountAvg: $getProcessedRequestsCountAvg%.2f, " +
+        s"saturatedFlagWindow: ${saturatedFlagWindow.toString}, " +
+        s"processedRequestsCountWindow: ${processedRequestsCountWindow.toString}" +
+        s"}"
+    }
+  }
+
+  private class BoostedChannelStats(val processor: Processor,
+                                    val originProcessor: Processor,
+                                    val returnThreshold: Long,
+                                    cooldownTick: Int) {
+    private val idleFlagWindow = new CircularStatWindow(idleChannelDetectionWindowSize)
+    private val processedRequestsCountWindow = new CircularStatWindow(processedRequestsCountWindowSize)
+    private var prevCumulativeProcessedRequestsCount: Option[Long] = None
+    private var cooldownCounter: Int = cooldownTick
+
+    private var tick: Int = processedRequestsCountWindowSize
+
+    def isFullyIdle: Boolean = idleFlagWindow.sum >= idleChannelDetectionWindowSize
+    def putNewIdleFlag(newFlag: Boolean): Unit = idleFlagWindow.put(if (newFlag) 1 else 0)
+
+    def isProcessedRequestsCountFullyLoaded: Boolean = processedRequestsCountWindow.size >= processedRequestsCountWindowSize
+    def getProcessedRequestsCountAvg: Double = processedRequestsCountWindow.avg
+    def putNewCumulativeProcessedRequestsCount(newCPR: Long, elapsedMs: Long): Unit = {
+      prevCumulativeProcessedRequestsCount.foreach(prev => processedRequestsCountWindow.put(newCPR - prev, elapsedMs))
+      prevCumulativeProcessedRequestsCount = Some(newCPR)
+      tick += 1
+    }
+    def updatePrevCumulativeProcessedRequestsCountOnly(newCPR: Long): Unit = prevCumulativeProcessedRequestsCount = Some(newCPR)
+
+    def decrementCooldownCounterIfNeeded(): Boolean = {
+      if (cooldownCounter > 0) {
+        cooldownCounter -= 1
+        return true
+      }
+      false
+    }
+
+    def getStatLogStringIfFullyLoaded: Option[String] = {
+      if (tick < processedRequestsCountWindowSize) return None
+      tick = 0
+      Some(toString)
+    }
+
+    override def toString: String = {
+      s"{" +
+        s"processorId: ${processor.id}, " +
+        s"cooldownCounter: $cooldownCounter, " +
+        f"returnThreshold: $returnThreshold, " +
+        f"processedRequestsCountAvg: $getProcessedRequestsCountAvg%.2f, " +
+        s"processedRequestsCountWindow: ${processedRequestsCountWindow.toString}, " +
+        s"idleFlagWindow: ${idleFlagWindow.toString}" +
+        s"}"
+    }
+  }
+}
+
+private class CircularStatWindow(windowSize: Int) {
+  private val _values: Array[Long] = Array.fill(windowSize)(0L)
+  private val _weights: Array[Long] = Array.fill(windowSize)(0L)
+
+  private var _index: Int = 0
+  private var _size: Int = 0
+
+  private var _sum: Long = 0L
+  private var _weightedSum: Long = 0L
+  private var _sumWeights: Long = 0L
+
+  def size: Int = _size
+  def sum: Long = _sum
+  def avg: Double = if (_sumWeights == 0) 0.0 else _weightedSum.toDouble / _sumWeights.toDouble
+
+  def put(newVal: Long, newWeight: Long = 1L): Unit = {
+    val oldVal = _values(_index)
+    val oldWeight = _weights(_index)
+
+    _values(_index) = newVal
+    _weights(_index) = newWeight
+    _index = (_index + 1) % windowSize
+
+    updateStat(oldVal, oldWeight, newVal, newWeight)
+  }
+
+  def clear(): Unit = {
+    _index = 0
+    _size = 0
+    _sum = 0L
+    _weightedSum = 0L
+    _sumWeights = 0L
+  }
+
+  private def updateStat(oldVal: Long, oldWeight: Long, newVal: Long, newWeight: Long): Unit = {
+    val alreadyFilled = _size >= windowSize
+    if (!alreadyFilled) _size += 1
+
+    _sum = _sum + newVal - (if (alreadyFilled) oldVal else 0L)
+    _weightedSum = _weightedSum + newVal * newWeight - (if (alreadyFilled) oldVal * oldWeight else 0L)
+    _sumWeights = _sumWeights + newWeight - (if (alreadyFilled) oldWeight else 0L)
+  }
+
+  override def toString: String = {
+    val result = new ArrayBuffer[String]
+    for (i <- (_index - 1) to (_index - _size) by -1) {
+      val idx = Math.floorMod(i, windowSize)
+      result += s"(${_values(idx)},${_weights(idx)})"
+    }
+    s"[${result.mkString(",")}]"
   }
 }
