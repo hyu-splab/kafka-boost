@@ -135,6 +135,9 @@ public class KafkaChannel implements AutoCloseable {
     private boolean midWrite;
     private long lastReauthenticationStartNanos;
 
+    private volatile boolean isMigrating = false;
+    private volatile String lastClientId = "";
+
     public KafkaChannel(String id, TransportLayer transportLayer, Supplier<Authenticator> authenticatorCreator,
                         int maxReceiveSize, MemoryPool memoryPool, ChannelMetadataRegistry metadataRegistry) {
         this.id = id;
@@ -153,6 +156,22 @@ public class KafkaChannel implements AutoCloseable {
     public void close() throws IOException {
         this.disconnected = true;
         Utils.closeAll(transportLayer, authenticator, receive, metadataRegistry);
+    }
+
+    public void setMigrating(boolean migrating) {
+        this.isMigrating = migrating;
+    }
+
+    public boolean isMigrating() {
+        return this.isMigrating;
+    }
+
+    public String getLastClientId() {
+        return this.lastClientId;
+    }
+
+    public void setLastClientId(String lastClientId) {
+        this.lastClientId = lastClientId;
     }
 
     /**

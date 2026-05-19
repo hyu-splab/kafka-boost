@@ -2146,19 +2146,29 @@ class SocketServerTest {
                                                                              memoryPool,
                                                                              apiVersionManager) {
 
+    private val clientBoostManager = new ClientBoostManager(
+      endPoint.listenerName,
+      endPoint.securityProtocol,
+      cfg,
+      connectionQuotas,
+      time,
+      isPrivilegedListener,
+      metrics,
+      credentialProvider,
+      logContext,
+      memoryPool,
+      apiVersionManager,
+      () => 0
+    )
+
     override def newProcessor(id: Int, listenerName: ListenerName, securityProtocol: SecurityProtocol): Processor = {
-      new TestableProcessor(id, time, requestChannel, listenerName, securityProtocol, cfg, connectionQuotas, connectionQueueSize, isPrivilegedListener)
+      new TestableProcessor(id, time, requestChannel, listenerName, securityProtocol, cfg, connectionQuotas, connectionQueueSize, isPrivilegedListener, Some(clientBoostManager))
     }
 
     def isOpen: Boolean = serverChannel.isOpen
   }
 
-  class TestReassignRoutes extends ReassignRoutes {
-
-    override def reassignChannelIfNeeded(clientId: String, channel: KafkaChannel, oldSelector: Selector, req: RequestChannel.Request, returnRoutes: ReassignRoutes): Boolean = false
-  }
-
-  class TestableProcessor(id: Int, time: Time, requestChannel: RequestChannel, listenerName: ListenerName, securityProtocol: SecurityProtocol, config: KafkaConfig, connectionQuotas: ConnectionQuotas, connectionQueueSize: Int, isPrivilegedListener: Boolean)
+  class TestableProcessor(id: Int, time: Time, requestChannel: RequestChannel, listenerName: ListenerName, securityProtocol: SecurityProtocol, config: KafkaConfig, connectionQuotas: ConnectionQuotas, connectionQueueSize: Int, isPrivilegedListener: Boolean, maybeClientBoostManager: Option[ClientBoostManager])
   extends Processor(id,
                     time,
                     10000,
@@ -2177,7 +2187,7 @@ class SocketServerTest {
                     isPrivilegedListener,
                     apiVersionManager,
                     s"TestableProcessor$id",
-                    new TestReassignRoutes(),
+                    maybeClientBoostManager,
                     None) {
     private var connectionId: Option[String] = None
     private var conn: Option[Socket] = None
