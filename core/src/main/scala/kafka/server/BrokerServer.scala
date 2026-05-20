@@ -19,6 +19,7 @@ package kafka.server
 
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter}
 import kafka.coordinator.transaction.TransactionCoordinator
+import kafka.interceptor.{IProcessorInterceptorBuilder, LogProduceRequestStatInterceptorBuilder}
 import kafka.log.LogManager
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
@@ -272,13 +273,17 @@ class BrokerServer(
       // Create and start the socket server acceptor threads so that the bound port is known.
       // Delay starting processors until the end of the initialization sequence to ensure
       // that credentials have been loaded before processing authentications.
+      val processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder] = Vector(
+        new LogProduceRequestStatInterceptorBuilder(time)
+      )
       socketServer = new SocketServer(config,
         metrics,
         time,
         credentialProvider,
         apiVersionManager,
         sharedServer.socketFactory,
-        connectionDisconnectListeners)
+        connectionDisconnectListeners,
+        processorInterceptorBuilders)
 
       clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas)
 
@@ -448,8 +453,7 @@ class BrokerServer(
         brokerTopicStats
       )
 
-      dataPlaneRequestProcessor = new KafkaApis(
-        requestChannel = socketServer.dataPlaneRequestChannel,
+      val apisBuilder = KafkaApisBuilder().copy(
         forwardingManager = forwardingManager,
         replicaManager = replicaManager,
         groupCoordinator = groupCoordinator,
@@ -471,7 +475,12 @@ class BrokerServer(
         tokenManager = tokenManager,
         apiVersionManager = apiVersionManager,
         clientMetricsManager = clientMetricsManager,
-        groupConfigManager = groupConfigManager)
+        groupConfigManager = groupConfigManager
+      )
+
+      dataPlaneRequestProcessor = apisBuilder.
+        withRequestChannel(socketServer.dataPlaneRequestChannel).
+        build()
 
       dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
@@ -584,6 +593,7 @@ class BrokerServer(
             config.earlyStartListeners.map(_.value()).asJava))
       }
       val authorizerFutures = endpointReadyFutures.futures().asScala.toMap
+      socketServer.setApiRequestHandlerBuilder(apisBuilder)
       val enableRequestProcessingFuture = socketServer.enableRequestProcessing(authorizerFutures)
 
       // Block here until all the authorizer futures are complete.

@@ -30,13 +30,22 @@ import java.nio.channels.SocketChannel;
 import java.security.Principal;
 
 public class PlaintextTransportLayer implements TransportLayer {
-    private final SelectionKey key;
+    private SelectionKey key;
     private final SocketChannel socketChannel;
     private final Principal principal = KafkaPrincipal.ANONYMOUS;
 
     public PlaintextTransportLayer(SelectionKey key) {
         this.key = key;
         this.socketChannel = (SocketChannel) key.channel();
+    }
+
+    @Override
+    public void updateSelectionKey(SelectionKey key) {
+        if (key == null)
+            throw new IllegalArgumentException("New key cannot be null");
+        if (key.channel() != socketChannel)
+            throw new IllegalArgumentException("New key must belong to the same socket channel");
+        this.key = key;
     }
 
     @Override

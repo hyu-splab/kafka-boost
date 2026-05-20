@@ -292,7 +292,7 @@ class ForwardingManagerTest {
     )
 
     new network.RequestChannel.Request(
-      processor = 1,
+      initialProcessor = 1,
       context = requestContext,
       startTimeNanos = time.nanoseconds(),
       memoryPool = MemoryPool.NONE,

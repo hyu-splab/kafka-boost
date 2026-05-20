@@ -18,6 +18,7 @@
 package kafka.server
 
 import kafka.network.SocketServer
+import kafka.interceptor.{IProcessorInterceptorBuilder, LogProduceRequestStatInterceptorBuilder}
 import kafka.raft.KafkaRaftManager
 import kafka.server.QuotaFactory.QuotaManagers
 
@@ -166,12 +167,16 @@ class ControllerServer(
 
       tokenCache = new DelegationTokenCache(ScramMechanism.mechanismNames)
       credentialProvider = new CredentialProvider(ScramMechanism.mechanismNames, tokenCache)
+      val processorInterceptorBuilders: Vector[IProcessorInterceptorBuilder] = Vector(
+        new LogProduceRequestStatInterceptorBuilder(time)
+      )
       socketServer = new SocketServer(config,
         metrics,
         time,
         credentialProvider,
         apiVersionManager,
-        sharedServer.socketFactory)
+        sharedServer.socketFactory,
+        processorInterceptorBuilders = processorInterceptorBuilders)
 
       val listenerInfo = ListenerInfo
         .create(config.effectiveAdvertisedControllerListeners.asJava)
@@ -271,17 +276,22 @@ class ControllerServer(
         time,
         s"controller-${config.nodeId}-", ProcessRole.ControllerRole.toString)
       clientQuotaMetadataManager = new ClientQuotaMetadataManager(quotaManagers, socketServer.connectionQuotas)
-      controllerApis = new ControllerApis(socketServer.dataPlaneRequestChannel,
-        authorizerPlugin,
-        quotaManagers,
-        time,
-        controller,
-        raftManager,
-        config,
-        clusterId,
-        registrationsPublisher,
-        apiVersionManager,
-        metadataCache)
+      val apisBuilder = ControllerApisBuilder().copy(
+        authorizerPlugin = authorizerPlugin,
+        quotas = quotaManagers,
+        time = time,
+        controller = controller,
+        raftManager = raftManager,
+        config = config,
+        clusterId = clusterId,
+        registrationsPublisher = registrationsPublisher,
+        apiVersionManager = apiVersionManager,
+        metadataCache = metadataCache
+      )
+      controllerApis = apisBuilder.
+        withRequestChannel(socketServer.dataPlaneRequestChannel).
+        build()
+
       controllerApisHandlerPool = new KafkaRequestHandlerPool(config.nodeId,
         socketServer.dataPlaneRequestChannel,
         controllerApis,
@@ -387,6 +397,7 @@ class ControllerServer(
 
       val authorizerFutures: Map[Endpoint, CompletableFuture[Void]] = endpointReadyFutures.futures().asScala.toMap
 
+      socketServer.setApiRequestHandlerBuilder(apisBuilder)
       /**
        * Enable the controller endpoint(s). If we are using an authorizer which stores
        * ACLs in the metadata log, such as StandardAuthorizer, we will be able to start

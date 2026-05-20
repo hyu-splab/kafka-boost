@@ -102,6 +102,8 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    private static class NoOpSelectorInterceptors implements ISelectorInterceptors {}
+
     private final Logger log;
     private final java.nio.channels.Selector nioSelector;
     private final Map<String, KafkaChannel> channels;
@@ -125,6 +127,7 @@ public class Selector implements Selectable, AutoCloseable {
     private final MemoryPool memoryPool;
     private final long lowMemThreshold;
     private final int failedAuthenticationDelayMs;
+    private final ISelectorInterceptors interceptors;
 
     //indicates if the previous call to poll was able to make progress in reading already-buffered data.
     //this is used to prevent tight loops when memory is not available to read any more data
@@ -155,7 +158,8 @@ public class Selector implements Selectable, AutoCloseable {
             boolean recordTimePerConnection,
             ChannelBuilder channelBuilder,
             MemoryPool memoryPool,
-            LogContext logContext) {
+            LogContext logContext,
+            ISelectorInterceptors interceptors) {
         try {
             this.nioSelector = java.nio.channels.Selector.open();
         } catch (IOException e) {
@@ -183,6 +187,23 @@ public class Selector implements Selectable, AutoCloseable {
         this.lowMemThreshold = (long) (0.1 * this.memoryPool.size());
         this.failedAuthenticationDelayMs = failedAuthenticationDelayMs;
         this.delayedClosingChannels = (failedAuthenticationDelayMs > NO_FAILED_AUTHENTICATION_DELAY) ? new LinkedHashMap<>() : null;
+        this.interceptors = interceptors;
+    }
+
+    public Selector(int maxReceiveSize,
+        long connectionMaxIdleMs,
+        int failedAuthenticationDelayMs,
+        Metrics metrics,
+        Time time,
+        String metricGrpPrefix,
+        Map<String, String> metricTags,
+        boolean metricsPerConnection,
+        boolean recordTimePerConnection,
+        ChannelBuilder channelBuilder,
+        MemoryPool memoryPool,
+        LogContext logContext) {
+        this(maxReceiveSize, connectionMaxIdleMs, failedAuthenticationDelayMs, metrics, time, metricGrpPrefix, metricTags,
+            metricsPerConnection, recordTimePerConnection, channelBuilder, memoryPool, logContext, new NoOpSelectorInterceptors());
     }
 
     public Selector(int maxReceiveSize,
@@ -197,7 +218,7 @@ public class Selector implements Selectable, AutoCloseable {
                     MemoryPool memoryPool,
                     LogContext logContext) {
         this(maxReceiveSize, connectionMaxIdleMs, NO_FAILED_AUTHENTICATION_DELAY, metrics, time, metricGrpPrefix, metricTags,
-                metricsPerConnection, recordTimePerConnection, channelBuilder, memoryPool, logContext);
+                metricsPerConnection, recordTimePerConnection, channelBuilder, memoryPool, logContext, new NoOpSelectorInterceptors());
     }
 
     public Selector(int maxReceiveSize,
@@ -210,7 +231,7 @@ public class Selector implements Selectable, AutoCloseable {
                     boolean metricsPerConnection,
                     ChannelBuilder channelBuilder,
                     LogContext logContext) {
-        this(maxReceiveSize, connectionMaxIdleMs, failedAuthenticationDelayMs, metrics, time, metricGrpPrefix, metricTags, metricsPerConnection, false, channelBuilder, MemoryPool.NONE, logContext);
+        this(maxReceiveSize, connectionMaxIdleMs, failedAuthenticationDelayMs, metrics, time, metricGrpPrefix, metricTags, metricsPerConnection, false, channelBuilder, MemoryPool.NONE, logContext, new NoOpSelectorInterceptors());
     }
 
     public Selector(int maxReceiveSize,
@@ -265,7 +286,8 @@ public class Selector implements Selectable, AutoCloseable {
         } catch (IOException | RuntimeException e) {
             if (key != null)
                 immediatelyConnectedKeys.remove(key);
-            channels.remove(id);
+            KafkaChannel removed = channels.remove(id);
+            if (removed != null) removed.setMigrating(false);
             socketChannel.close();
             throw e;
         }
@@ -352,6 +374,17 @@ public class Selector implements Selectable, AutoCloseable {
             Utils.closeQuietly(metadataRegistry, "metadataRegistry");
             throw new IOException("Channel could not be created for socket " + socketChannel, e);
         }
+    }
+
+    public void unregister(String id) {
+        KafkaChannel channel = this.channels.remove(id);
+        if (channel != null) channel.unregisterSelector();
+    }
+
+    public void reregister(KafkaChannel channel) throws IOException {
+        channel.reregisterSelector(nioSelector);
+        this.channels.put(channel.id(), channel);
+        if (idleExpiryManager != null) idleExpiryManager.update(channel.id(), time.nanoseconds());
     }
 
     /**
@@ -927,6 +960,7 @@ public class Selector implements Selectable, AutoCloseable {
      */
     private void close(KafkaChannel channel, CloseMode closeMode) {
         channel.disconnect();
+        channel.setMigrating(false);
 
         // Ensure that `connected` does not have closed channels. This could happen if `prepare` throws an exception
         // in the `poll` invocation when `finishConnect` succeeds
@@ -1056,6 +1090,7 @@ public class Selector implements Selectable, AutoCloseable {
         if (hasCompletedReceive(channel))
             throw new IllegalStateException("Attempting to add second completed receive to channel " + channel.id());
 
+        interceptors.beforePutCompletedReceive(channel, currentTimeMs);
         this.completedReceives.put(channel.id(), networkReceive);
         sensors.recordCompletedReceive(channel.id(), networkReceive.size(), currentTimeMs);
     }

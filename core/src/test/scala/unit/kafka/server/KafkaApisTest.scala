@@ -9499,7 +9499,7 @@ class KafkaApisTest extends Logging {
     val context = new RequestContext(header, "1", InetAddress.getLocalHost, Optional.empty(),
       new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "Alice"), listenerName, SecurityProtocol.SSL,
       ClientInformation.EMPTY, fromPrivilegedListener, Optional.of(kafkaPrincipalSerde))
-    new RequestChannel.Request(processor = 1, context = context, startTimeNanos = 0, MemoryPool.NONE, buffer,
+    new RequestChannel.Request(initialProcessor = 1, context = context, startTimeNanos = 0, MemoryPool.NONE, buffer,
       requestMetrics, envelope = None)
   }
 

@@ -62,7 +62,7 @@ object RequestChannel extends Logging {
   case class CallbackRequest(fun: RequestLocal => Unit,
                              originalRequest: Request) extends BaseRequest
 
-  class Request(val processor: Int,
+  class Request(initialProcessor: Int,
                 val context: RequestContext,
                 val startTimeNanos: Long,
                 val memoryPool: MemoryPool,
@@ -81,6 +81,10 @@ object RequestChannel extends Logging {
     @volatile var recordNetworkThreadTimeCallback: Option[java.util.function.Consumer[java.lang.Long]] = None
     @volatile var callbackRequestDequeueTimeNanos: Option[Long] = None
     @volatile var callbackRequestCompleteTimeNanos: Option[Long] = None
+
+    @volatile private var _processor: Int = initialProcessor
+    def processor: Int = _processor
+    def setProcessor(newProcessor: Int): Unit = this._processor = newProcessor
 
     val session: Session = new Session(context.principal, context.clientAddress)
 

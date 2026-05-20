@@ -842,7 +842,7 @@ class SocketServerTest {
       // except the Acceptor overriding a method to inject the exception
       override protected def createDataPlaneAcceptor(endPoint: Endpoint, isPrivilegedListener: Boolean, requestChannel: RequestChannel): DataPlaneAcceptor = {
 
-        new DataPlaneAcceptor(this, endPoint, this.config, nodeId, connectionQuotas, time, false, requestChannel, serverMetrics, this.credentialProvider, new LogContext(), MemoryPool.NONE, this.apiVersionManager) {
+        new DataPlaneAcceptor(this, endPoint, this.config, nodeId, connectionQuotas, time, false, requestChannel, serverMetrics, this.credentialProvider, new LogContext(), MemoryPool.NONE, this.apiVersionManager, this.processorInterceptorBuilders) {
           override protected def configureAcceptedSocketChannel(socketChannel: SocketChannel): Unit = {
             assertEquals(1, connectionQuotas.get(socketChannel.socket.getInetAddress))
             throw new IOException("test injected IOException")
@@ -2016,13 +2016,31 @@ class SocketServerTest {
                                                                              credentialProvider,
                                                                              logContext,
                                                                              memoryPool,
-                                                                             apiVersionManager) {
+                                                                             apiVersionManager,
+                                                                             Vector.empty) {
+
+    private val clientBoostManager = new ClientBoostManager(
+      ListenerName.normalised(endPoint.listener),
+      endPoint.securityProtocol,
+      cfg,
+      connectionQuotas,
+      time,
+      isPrivilegedListener,
+      metrics,
+      credentialProvider,
+      logContext,
+      memoryPool,
+      apiVersionManager,
+      () => 0,
+      socketServer.connectionDisconnectListeners,
+      Vector.empty
+    )
 
     override def newProcessor(id: Int,
                               listenerName: ListenerName,
                               securityProtocol: SecurityProtocol,
                               connectionDisconnectListeners: scala.collection.Seq[ConnectionDisconnectListener] = Seq.empty): Processor = {
-      new TestableProcessor(id, time, requestChannel, listenerName, securityProtocol, cfg, connectionQuotas, connectionQueueSize, isPrivilegedListener, socketServer.connectionDisconnectListeners)
+      new TestableProcessor(id, time, requestChannel, listenerName, securityProtocol, cfg, connectionQuotas, connectionQueueSize, isPrivilegedListener, socketServer.connectionDisconnectListeners, Some(clientBoostManager))
     }
 
     def isOpen: Boolean = serverChannel.isOpen
@@ -2037,7 +2055,8 @@ class SocketServerTest {
                           connectionQuotas: ConnectionQuotas,
                           connectionQueueSize: Int,
                           isPrivilegedListener: Boolean,
-                          connectionDisconnectListeners: scala.collection.Seq[ConnectionDisconnectListener])
+                          connectionDisconnectListeners: scala.collection.Seq[ConnectionDisconnectListener],
+                          maybeClientBoostManager: Option[ClientBoostManager])
   extends Processor(id,
                     time,
                     10000,
@@ -2056,7 +2075,10 @@ class SocketServerTest {
                     isPrivilegedListener,
                     apiVersionManager,
                     s"TestableProcessor$id",
-                    connectionDisconnectListeners) {
+                    connectionDisconnectListeners,
+                    maybeClientBoostManager,
+                    None,
+                    Vector.empty) {
     private var connectionId: Option[String] = None
     private var conn: Option[Socket] = None
 

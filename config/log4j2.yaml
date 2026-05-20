@@ -86,6 +86,15 @@ Configuration:
         TimeBasedTriggeringPolicy:
           modulate: true
           interval: 1
+      # Stats per channels appender
+      - name: ChannelRequestAppender
+        fileName: "${sys:kafka.logs.dir}/channel-request.log"
+        filePattern: "${sys:kafka.logs.dir}/channel-request.log.%d{yyyy-MM-dd}"
+        PatternLayout:
+          pattern: "[%d] %p %m%n"
+        TimeBasedTriggeringPolicy:
+          modulate: true
+          interval: 1
 
   # Loggers configuration
   # See: https://logging.apache.org/log4j/2.x/manual/configuration.html#configuring-loggers
@@ -160,3 +169,9 @@ Configuration:
         additivity: false
         AppenderRef:
           ref: AuthorizerAppender
+      # Stats per channels looger
+      - name: channel.requests
+        level: INFO
+        additivity: false
+        AppenderRef:
+          ref: ChannelRequestAppender

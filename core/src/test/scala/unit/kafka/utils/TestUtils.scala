@@ -1487,7 +1487,7 @@ object TestUtils extends Logging {
       fromPrivilegedListener, Optional.of(principalSerde))
 
     val envelopRequest = new RequestChannel.Request(
-      processor = 1,
+      initialProcessor = 1,
       context = envelopeContext,
       startTimeNanos = startTimeNanos,
       memoryPool = MemoryPool.NONE,

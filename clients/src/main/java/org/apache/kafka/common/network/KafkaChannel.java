@@ -29,6 +29,8 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -113,6 +115,12 @@ public class KafkaChannel implements AutoCloseable {
         THROTTLE_ENDED
     }
 
+    public enum ChannelLoadState {
+        INIT,
+        IDLE,
+        SATURATED,
+    }
+
     private final String id;
     private final TransportLayer transportLayer;
     private final Supplier<Authenticator> authenticatorCreator;
@@ -135,6 +143,12 @@ public class KafkaChannel implements AutoCloseable {
     private boolean midWrite;
     private long lastReauthenticationStartNanos;
 
+    private final LongAdder cumulativeProcessedRequests = new LongAdder();
+    private final AtomicReference<ChannelLoadState> loadState = new AtomicReference<>(ChannelLoadState.INIT);
+
+    private volatile boolean isMigrating = false;
+    private volatile String lastClientId = "";
+
     public KafkaChannel(String id, TransportLayer transportLayer, Supplier<Authenticator> authenticatorCreator,
                         int maxReceiveSize, MemoryPool memoryPool, ChannelMetadataRegistry metadataRegistry) {
         this.id = id;
@@ -153,6 +167,42 @@ public class KafkaChannel implements AutoCloseable {
     public void close() throws IOException {
         this.disconnected = true;
         Utils.closeAll(transportLayer, authenticator, receive, metadataRegistry);
+    }
+
+    public long getCumulativeProcessedRequests() {
+        return cumulativeProcessedRequests.sum();
+    }
+
+    public void inclCumulativeProcessedRequests() {
+        cumulativeProcessedRequests.add(1);
+    }
+
+    public void markSaturated() {
+        loadState.set(ChannelLoadState.SATURATED);
+    }
+
+    public void markIdle() {
+        this.loadState.set(ChannelLoadState.IDLE);
+    }
+
+    public ChannelLoadState getLoadStateAndReset() {
+        return this.loadState.getAndSet(ChannelLoadState.INIT);
+    }
+
+    public void setMigrating(boolean migrating) {
+        this.isMigrating = migrating;
+    }
+
+    public boolean isMigrating() {
+        return this.isMigrating;
+    }
+
+    public String getLastClientId() {
+        return this.lastClientId;
+    }
+
+    public void setLastClientId(String lastClientId) {
+        this.lastClientId = lastClientId;
     }
 
     /**
@@ -680,5 +730,28 @@ public class KafkaChannel implements AutoCloseable {
 
     public ChannelMetadataRegistry channelMetadataRegistry() {
         return metadataRegistry;
+    }
+
+    /**
+     * Unregisters the selection key from the current selector.
+     */
+    public void unregisterSelector() {
+        SelectionKey oldKey = transportLayer.selectionKey();
+        oldKey.cancel();
+    }
+
+    /**
+     * Reregisters the selection key with a new selector.
+     * @param newNioSelector The new selector to register with
+     * @throws IOException If the registration fails
+     * @throws IllegalStateException If the current selection key is still valid
+     */
+    public void reregisterSelector(java.nio.channels.Selector newNioSelector) throws IOException {
+        SelectionKey oldKey = transportLayer.selectionKey();
+        if (oldKey.isValid()) {
+            throw new IllegalStateException("Cannot reregister a channel that is still valid on another selector.");
+        }
+        SelectionKey newKey = transportLayer.socketChannel().register(newNioSelector, SelectionKey.OP_READ, this);
+        transportLayer.updateSelectionKey(newKey);
     }
 }

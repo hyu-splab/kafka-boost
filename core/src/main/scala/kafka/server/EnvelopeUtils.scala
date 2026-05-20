@@ -86,7 +86,7 @@ object EnvelopeUtils {
   ): RequestChannel.Request = {
     try {
       val forwardedRequest = new RequestChannel.Request(
-        processor = envelope.processor,
+        initialProcessor = envelope.processor,
         context = forwardedContext,
         startTimeNanos = envelope.startTimeNanos,
         envelope.memoryPool,

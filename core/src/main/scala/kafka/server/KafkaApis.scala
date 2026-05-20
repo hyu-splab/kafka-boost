@@ -4159,3 +4159,81 @@ object KafkaApis {
       .iterator.asScala.filter(element => element.getKey.topicPartition.topic != null && quota.isThrottled(element.getKey.topicPartition)).asJava)
   }
 }
+
+case class KafkaApisBuilder(
+  requestChannel: RequestChannel = null,
+  forwardingManager: ForwardingManager = null,
+  replicaManager: ReplicaManager = null,
+  groupCoordinator: GroupCoordinator = null,
+  txnCoordinator: TransactionCoordinator = null,
+  shareCoordinator: ShareCoordinator = null,
+  autoTopicCreationManager: AutoTopicCreationManager = null,
+  brokerId: Int = 0,
+  config: KafkaConfig = null,
+  configRepository: ConfigRepository = null,
+  metadataCache: MetadataCache = null,
+  metrics: Metrics = null,
+  authorizerPlugin: Option[Plugin[Authorizer]] = None,
+  quotas: QuotaManagers = null,
+  fetchManager: FetchManager = null,
+  sharePartitionManager: SharePartitionManager = null,
+  brokerTopicStats: BrokerTopicStats = null,
+  clusterId: String = "clusterId",
+  time: Time = Time.SYSTEM,
+  tokenManager: DelegationTokenManager = null,
+  apiVersionManager: ApiVersionManager = null,
+  clientMetricsManager: ClientMetricsManager = null,
+  groupConfigManager: GroupConfigManager = null
+) extends ApiRequestHandlerBuilder {
+
+  override def withRequestChannel(requestChannel: RequestChannel): KafkaApisBuilder = copy(requestChannel = requestChannel)
+
+  override def build(): KafkaApis = {
+    if (requestChannel == null) throw new RuntimeException("you must set requestChannel")
+    if (forwardingManager == null) throw new RuntimeException("you must set forwardingManager")
+    if (replicaManager == null) throw new RuntimeException("You must set replicaManager")
+    if (groupCoordinator == null) throw new RuntimeException("You must set groupCoordinator")
+    if (txnCoordinator == null) throw new RuntimeException("You must set txnCoordinator")
+    if (shareCoordinator == null) throw new RuntimeException("You must set shareCoordinator")
+    if (autoTopicCreationManager == null) throw new RuntimeException("You must set autoTopicCreationManager")
+    val finalConfig = if (config == null) new KafkaConfig(java.util.Collections.emptyMap) else config
+    if (configRepository == null) throw new RuntimeException("You must set configRepository")
+    if (metadataCache == null) throw new RuntimeException("You must set metadataCache")
+    if (metrics == null) throw new RuntimeException("You must set metrics")
+    if (authorizerPlugin == null) throw new RuntimeException("You must set authorizerPlugin")
+    if (quotas == null) throw new RuntimeException("You must set quotas")
+    if (fetchManager == null) throw new RuntimeException("You must set fetchManager")
+    if (sharePartitionManager == null) throw new RuntimeException("You must set sharePartitionManager")
+    val finalBrokerTopicStats = if (brokerTopicStats == null) new BrokerTopicStats(finalConfig.remoteLogManagerConfig.isRemoteStorageSystemEnabled) else brokerTopicStats
+    if (tokenManager == null) throw new RuntimeException("You must set tokenManager")
+    if (apiVersionManager == null) throw new RuntimeException("You must set apiVersionManager")
+    if (clientMetricsManager == null) throw new RuntimeException("You must set clientMetricsManager")
+    if (groupConfigManager == null) throw new RuntimeException("You must set groupConfigManager")
+
+    new KafkaApis(
+      requestChannel,
+      forwardingManager,
+      replicaManager,
+      groupCoordinator,
+      txnCoordinator,
+      shareCoordinator,
+      autoTopicCreationManager,
+      brokerId,
+      finalConfig,
+      configRepository,
+      metadataCache,
+      metrics,
+      authorizerPlugin,
+      quotas,
+      fetchManager,
+      sharePartitionManager,
+      finalBrokerTopicStats,
+      clusterId,
+      time,
+      tokenManager,
+      apiVersionManager,
+      clientMetricsManager,
+      groupConfigManager
+    )
+  }
+}

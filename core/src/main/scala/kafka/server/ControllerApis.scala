@@ -1102,3 +1102,45 @@ class ControllerApis(
     handleRaftRequest(request, response => new UpdateRaftVoterResponse(response.asInstanceOf[UpdateRaftVoterResponseData]))
   }
 }
+
+case class ControllerApisBuilder(
+  requestChannel: RequestChannel = null,
+  authorizerPlugin: Option[Plugin[Authorizer]] = None,
+  quotas: QuotaManagers = null,
+  time: Time = Time.SYSTEM,
+  controller: Controller = null,
+  raftManager: RaftManager[ApiMessageAndVersion] = null,
+  config: KafkaConfig = null,
+  clusterId: String = "clusterId",
+  registrationsPublisher: ControllerRegistrationsPublisher = null,
+  apiVersionManager: ApiVersionManager = null,
+  metadataCache: KRaftMetadataCache = null
+) extends ApiRequestHandlerBuilder {
+
+  override def withRequestChannel(requestChannel: RequestChannel): ControllerApisBuilder = copy(requestChannel = requestChannel)
+
+  override def build(): ControllerApis = {
+    if (requestChannel == null) throw new RuntimeException("you must set requestChannel")
+    if (quotas == null) throw new RuntimeException("you must set quotas")
+    if (controller == null) throw new RuntimeException("you must set controller")
+    if (raftManager == null) throw new RuntimeException("you must set raftManager")
+    val finalConfig = if (config == null) new KafkaConfig(java.util.Collections.emptyMap) else config
+    if (registrationsPublisher == null) throw new RuntimeException("you must set registrationsPublisher")
+    if (apiVersionManager == null) throw new RuntimeException("you must set apiVersionManager")
+    if (metadataCache == null) throw new RuntimeException("you must set metadataCache")
+
+    new ControllerApis(
+      requestChannel,
+      authorizerPlugin,
+      quotas,
+      time,
+      controller,
+      raftManager,
+      finalConfig,
+      clusterId,
+      registrationsPublisher,
+      apiVersionManager,
+      metadataCache
+    )
+  }
+}
