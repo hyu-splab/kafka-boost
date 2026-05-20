@@ -31,6 +31,10 @@ TC_PATHS="tests/kafkatest/tests/streams tests/kafkatest/tests/tools" bash tests/
 ```
 TC_PATHS="tests/kafkatest/tests/client/pluggable_test.py" bash tests/docker/run_tests.sh
 ```
+* Run multiple test files
+```
+TC_PATHS="tests/kafkatest/tests/client/pluggable_test.py tests/kafkatest/services/console_consumer.py" bash tests/docker/run_tests.sh
+```
 * Run a specific test class
 ```
 TC_PATHS="tests/kafkatest/tests/client/pluggable_test.py::PluggableConsumerTest" bash tests/docker/run_tests.sh
@@ -43,10 +47,15 @@ TC_PATHS="tests/kafkatest/tests/client/pluggable_test.py::PluggableConsumerTest.
 ```
 TC_PATHS="tests/kafkatest/tests/streams/streams_upgrade_test.py::StreamsUpgradeTest.test_metadata_upgrade" _DUCKTAPE_OPTIONS='--parameters '\''{"from_version":"0.10.1.1","to_version":"2.6.0-SNAPSHOT"}'\' bash tests/docker/run_tests.sh
 ```
+* Run tests with a specific image name
+```
+image_name="ducker-ak-openjdk:17" bash tests/docker/run_tests.sh
+```
 * Run tests with a different JVM
 ```
-bash tests/docker/ducker-ak up -j 'openjdk:11'; tests/docker/run_tests.sh
+bash tests/docker/ducker-ak up -j '<JDK_IMAGE>'; tests/docker/run_tests.sh
 ```
+  You can customize the OpenJDK base image using the `-j` or `--jdk` parameter, otherwise a default value will be used.
 * Remove ducker-ak containers
 ```
 bash tests/docker/ducker-ak down -f

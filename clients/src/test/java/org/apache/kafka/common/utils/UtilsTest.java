@@ -22,6 +22,8 @@ import org.apache.kafka.test.TestUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.stubbing.OngoingStubbing;
 
 import java.io.Closeable;
@@ -77,7 +79,6 @@ import static org.apache.kafka.common.utils.Utils.getHost;
 import static org.apache.kafka.common.utils.Utils.getPort;
 import static org.apache.kafka.common.utils.Utils.intersection;
 import static org.apache.kafka.common.utils.Utils.mkEntry;
-import static org.apache.kafka.common.utils.Utils.mkSet;
 import static org.apache.kafka.common.utils.Utils.murmur2;
 import static org.apache.kafka.common.utils.Utils.union;
 import static org.apache.kafka.common.utils.Utils.validHostPattern;
@@ -116,16 +117,35 @@ public class UtilsTest {
         }
     }
 
-    @Test
-    public void testGetHost() {
+    @ParameterizedTest
+    @CsvSource(value = {"PLAINTEXT", "SASL_PLAINTEXT", "SSL", "SASL_SSL"})
+    public void testGetHostValid(String protocol) {
+        assertEquals("mydomain.com", getHost(protocol + "://mydomain.com:8080"));
+        assertEquals("MyDomain.com", getHost(protocol + "://MyDomain.com:8080"));
+        assertEquals("My_Domain.com", getHost(protocol + "://My_Domain.com:8080"));
+        assertEquals("::1", getHost(protocol + "://[::1]:1234"));
+        assertEquals("2001:db8:85a3:8d3:1319:8a2e:370:7348", getHost(protocol + "://[2001:db8:85a3:8d3:1319:8a2e:370:7348]:5678"));
+        assertEquals("2001:DB8:85A3:8D3:1319:8A2E:370:7348", getHost(protocol + "://[2001:DB8:85A3:8D3:1319:8A2E:370:7348]:5678"));
+        assertEquals("fe80::b1da:69ca:57f7:63d8%3", getHost(protocol + "://[fe80::b1da:69ca:57f7:63d8%3]:5678"));
         assertEquals("127.0.0.1", getHost("127.0.0.1:8000"));
-        assertEquals("mydomain.com", getHost("PLAINTEXT://mydomain.com:8080"));
-        assertEquals("MyDomain.com", getHost("PLAINTEXT://MyDomain.com:8080"));
-        assertEquals("My_Domain.com", getHost("PLAINTEXT://My_Domain.com:8080"));
         assertEquals("::1", getHost("[::1]:1234"));
-        assertEquals("2001:db8:85a3:8d3:1319:8a2e:370:7348", getHost("PLAINTEXT://[2001:db8:85a3:8d3:1319:8a2e:370:7348]:5678"));
-        assertEquals("2001:DB8:85A3:8D3:1319:8A2E:370:7348", getHost("PLAINTEXT://[2001:DB8:85A3:8D3:1319:8A2E:370:7348]:5678"));
-        assertEquals("fe80::b1da:69ca:57f7:63d8%3", getHost("PLAINTEXT://[fe80::b1da:69ca:57f7:63d8%3]:5678"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"PLAINTEXT", "SASL_PLAINTEXT", "SSL", "SASL_SSL"})
+    public void testGetHostInvalid(String protocol) {
+        assertNull(getHost(protocol + "://mydo)main.com:8080"));
+        assertNull(getHost(protocol + "://mydo(main.com:8080"));
+        assertNull(getHost(protocol + "://mydo()main.com:8080"));
+        assertNull(getHost(protocol + "://mydo(main).com:8080"));
+        assertNull(getHost(protocol + "://[2001:db)8:85a3:8d3:1319:8a2e:370:7348]:5678"));
+        assertNull(getHost(protocol + "://[2001:db(8:85a3:8d3:1319:8a2e:370:7348]:5678"));
+        assertNull(getHost(protocol + "://[2001:db()8:85a3:8d3:1319:8a2e:370:7348]:5678"));
+        assertNull(getHost(protocol + "://[2001:db(8:85a3:)8d3:1319:8a2e:370:7348]:5678"));
+        assertNull(getHost("ho)st:9092"));
+        assertNull(getHost("ho(st:9092"));
+        assertNull(getHost("ho()st:9092"));
+        assertNull(getHost("ho(st):9092"));
     }
 
     @Test
@@ -140,6 +160,7 @@ public class UtilsTest {
 
     @Test
     public void testGetPort() {
+        // valid
         assertEquals(8000, getPort("127.0.0.1:8000").intValue());
         assertEquals(8080, getPort("mydomain.com:8080").intValue());
         assertEquals(8080, getPort("MyDomain.com:8080").intValue());
@@ -147,6 +168,12 @@ public class UtilsTest {
         assertEquals(5678, getPort("[2001:db8:85a3:8d3:1319:8a2e:370:7348]:5678").intValue());
         assertEquals(5678, getPort("[2001:DB8:85A3:8D3:1319:8A2E:370:7348]:5678").intValue());
         assertEquals(5678, getPort("[fe80::b1da:69ca:57f7:63d8%3]:5678").intValue());
+
+        // invalid
+        assertNull(getPort("host:-92"));
+        assertNull(getPort("host:-9-2"));
+        assertNull(getPort("host:92-"));
+        assertNull(getPort("host:9-2"));
     }
 
     @Test
@@ -175,6 +202,7 @@ public class UtilsTest {
         assertEquals(10, Utils.abs(10));
         assertEquals(0, Utils.abs(0));
         assertEquals(1, Utils.abs(-1));
+        assertEquals(Integer.MAX_VALUE, Utils.abs(Integer.MAX_VALUE));
     }
 
     @Test
@@ -743,16 +771,14 @@ public class UtilsTest {
         when(mockIterator.next()).thenReturn(rootDir.toPath()).thenReturn(subDir.toPath());
         when(mockIterator.hasNext()).thenReturn(true).thenReturn(true).thenReturn(false);
 
-        assertDoesNotThrow(() -> {
-            Utils.delete(spyRootFile);
-        });
+        assertDoesNotThrow(() -> Utils.delete(spyRootFile));
         assertFalse(Files.exists(rootDir.toPath()));
         assertFalse(Files.exists(subDir.toPath()));
     }
 
     @Test
     public void testConvertTo32BitField() {
-        Set<Byte> bytes = mkSet((byte) 0, (byte) 1, (byte) 5, (byte) 10, (byte) 31);
+        Set<Byte> bytes = Set.of((byte) 0, (byte) 1, (byte) 5, (byte) 10, (byte) 31);
         int bitField = Utils.to32BitField(bytes);
         assertEquals(bytes, Utils.from32BitField(bitField));
 
@@ -760,37 +786,37 @@ public class UtilsTest {
         bitField = Utils.to32BitField(bytes);
         assertEquals(bytes, Utils.from32BitField(bitField));
 
-        assertThrows(IllegalArgumentException.class, () -> Utils.to32BitField(mkSet((byte) 0, (byte) 11, (byte) 32)));
+        assertThrows(IllegalArgumentException.class, () -> Utils.to32BitField(Set.of((byte) 0, (byte) 11, (byte) 32)));
     }
 
     @Test
     public void testUnion() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
-        final Set<String> anotherSet = mkSet("c", "d", "e");
+        final Set<String> oneSet = Set.of("a", "b", "c");
+        final Set<String> anotherSet = Set.of("c", "d", "e");
         final Set<String> union = union(TreeSet::new, oneSet, anotherSet);
 
-        assertEquals(mkSet("a", "b", "c", "d", "e"), union);
+        assertEquals(Set.of("a", "b", "c", "d", "e"), union);
         assertEquals(TreeSet.class, union.getClass());
     }
 
     @Test
     public void testUnionOfOne() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
+        final Set<String> oneSet = Set.of("a", "b", "c");
         final Set<String> union = union(TreeSet::new, oneSet);
 
-        assertEquals(mkSet("a", "b", "c"), union);
+        assertEquals(Set.of("a", "b", "c"), union);
         assertEquals(TreeSet.class, union.getClass());
     }
 
     @Test
     public void testUnionOfMany() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
-        final Set<String> twoSet = mkSet("c", "d", "e");
-        final Set<String> threeSet = mkSet("b", "c", "d");
-        final Set<String> fourSet = mkSet("x", "y", "z");
+        final Set<String> oneSet = Set.of("a", "b", "c");
+        final Set<String> twoSet = Set.of("c", "d", "e");
+        final Set<String> threeSet = Set.of("b", "c", "d");
+        final Set<String> fourSet = Set.of("x", "y", "z");
         final Set<String> union = union(TreeSet::new, oneSet, twoSet, threeSet, fourSet);
 
-        assertEquals(mkSet("a", "b", "c", "d", "e", "x", "y", "z"), union);
+        assertEquals(Set.of("a", "b", "c", "d", "e", "x", "y", "z"), union);
         assertEquals(TreeSet.class, union.getClass());
     }
 
@@ -804,40 +830,40 @@ public class UtilsTest {
 
     @Test
     public void testIntersection() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
-        final Set<String> anotherSet = mkSet("c", "d", "e");
+        final Set<String> oneSet = Set.of("a", "b", "c");
+        final Set<String> anotherSet = Set.of("c", "d", "e");
         final Set<String> intersection = intersection(TreeSet::new, oneSet, anotherSet);
 
-        assertEquals(mkSet("c"), intersection);
+        assertEquals(Set.of("c"), intersection);
         assertEquals(TreeSet.class, intersection.getClass());
     }
 
     @Test
     public void testIntersectionOfOne() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
+        final Set<String> oneSet = Set.of("a", "b", "c");
         final Set<String> intersection = intersection(TreeSet::new, oneSet);
 
-        assertEquals(mkSet("a", "b", "c"), intersection);
+        assertEquals(Set.of("a", "b", "c"), intersection);
         assertEquals(TreeSet.class, intersection.getClass());
     }
 
     @Test
     public void testIntersectionOfMany() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
-        final Set<String> twoSet = mkSet("c", "d", "e");
-        final Set<String> threeSet = mkSet("b", "c", "d");
+        final Set<String> oneSet = Set.of("a", "b", "c");
+        final Set<String> twoSet = Set.of("c", "d", "e");
+        final Set<String> threeSet = Set.of("b", "c", "d");
         final Set<String> intersection = intersection(TreeSet::new, oneSet, twoSet, threeSet);
 
-        assertEquals(mkSet("c"), intersection);
+        assertEquals(Set.of("c"), intersection);
         assertEquals(TreeSet.class, intersection.getClass());
     }
 
     @Test
     public void testDisjointIntersectionOfMany() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
-        final Set<String> twoSet = mkSet("c", "d", "e");
-        final Set<String> threeSet = mkSet("b", "c", "d");
-        final Set<String> fourSet = mkSet("x", "y", "z");
+        final Set<String> oneSet = Set.of("a", "b", "c");
+        final Set<String> twoSet = Set.of("c", "d", "e");
+        final Set<String> threeSet = Set.of("b", "c", "d");
+        final Set<String> fourSet = Set.of("x", "y", "z");
         final Set<String> intersection = intersection(TreeSet::new, oneSet, twoSet, threeSet, fourSet);
 
         assertEquals(emptySet(), intersection);
@@ -846,11 +872,11 @@ public class UtilsTest {
 
     @Test
     public void testDiff() {
-        final Set<String> oneSet = mkSet("a", "b", "c");
-        final Set<String> anotherSet = mkSet("c", "d", "e");
+        final Set<String> oneSet = Set.of("a", "b", "c");
+        final Set<String> anotherSet = Set.of("c", "d", "e");
         final Set<String> diff = diff(TreeSet::new, oneSet, anotherSet);
 
-        assertEquals(mkSet("a", "b"), diff);
+        assertEquals(Set.of("a", "b"), diff);
         assertEquals(TreeSet.class, diff.getClass());
     }
 

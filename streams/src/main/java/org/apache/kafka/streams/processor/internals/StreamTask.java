@@ -86,6 +86,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
     private final RecordCollector recordCollector;
     private final AbstractPartitionGroup.RecordInfo recordInfo;
     private final Map<TopicPartition, Long> consumedOffsets;
+    private final Map<TopicPartition, OffsetAndMetadata> nextOffsetsAndMetadataToBeConsumed = new HashMap<>();
     private final Map<TopicPartition, Long> committedOffsets;
     private final Map<TopicPartition, Long> highWatermark;
     private final Set<TopicPartition> resetOffsetsForPartitions;
@@ -416,7 +417,6 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         timeCurrentIdlingStarted = Optional.empty();
     }
 
-
     public void flush() {
         stateMgr.flushCache();
         recordCollector.flush();
@@ -428,7 +428,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
      * @return offsets that should be committed for this task
      */
     @Override
-    public Map<TopicPartition, OffsetAndMetadata> prepareCommit() {
+    public Map<TopicPartition, OffsetAndMetadata> prepareCommit(final boolean clean) {
         switch (state()) {
             case CREATED:
             case RESTORING:
@@ -443,6 +443,10 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                     //
                     // TODO: this should be removed after we decouple caching with emitting
                     flush();
+                    if (!clean) {
+                        log.debug("Skipped preparing {} task with id {} for commit since the task is getting closed dirty.", state(), id);
+                        return null;
+                    }
                     hasPendingTxCommit = eosEnabled;
 
                     log.debug("Prepared {} task for committing", state());
@@ -460,52 +464,44 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         }
     }
 
-    private Long findOffset(final TopicPartition partition) {
+    private Optional<OffsetAndMetadata> findOffsetAndMetadata(final TopicPartition partition) {
         Long offset = partitionGroup.headRecordOffset(partition);
+        Optional<Integer> leaderEpoch = partitionGroup.headRecordLeaderEpoch(partition);
+        final long partitionTime = partitionGroup.partitionTimestamp(partition);
         if (offset == null) {
-            try {
-                offset = mainConsumer.position(partition);
-            } catch (final TimeoutException error) {
-                // the `consumer.position()` call should never block, because we know that we did process data
-                // for the requested partition and thus the consumer should have a valid local position
-                // that it can return immediately
-
-                // hence, a `TimeoutException` indicates a bug and thus we rethrow it as fatal `IllegalStateException`
-                throw new IllegalStateException(error);
-            } catch (final KafkaException fatal) {
-                throw new StreamsException(fatal);
+            final OffsetAndMetadata offsetAndMetadata = nextOffsetsAndMetadataToBeConsumed.get(partition);
+            if (offsetAndMetadata == null) {
+                // it may be that we have not yet consumed any record from this partition, hence nothing to commit
+                return Optional.empty();
             }
+            offset = offsetAndMetadata.offset();
+            leaderEpoch = offsetAndMetadata.leaderEpoch();
         }
-        return offset;
+        return Optional.of(new OffsetAndMetadata(offset,
+                leaderEpoch,
+                new TopicPartitionMetadata(partitionTime, processorContext.processorMetadata()).encode()));
     }
 
     private Map<TopicPartition, OffsetAndMetadata> committableOffsetsAndMetadata() {
-        final Map<TopicPartition, OffsetAndMetadata> committableOffsets;
-
         switch (state()) {
             case CREATED:
             case RESTORING:
-                committableOffsets = Collections.emptyMap();
-
-                break;
+                return Collections.emptyMap();
 
             case RUNNING:
             case SUSPENDED:
-                final Map<TopicPartition, Long> partitionTimes = extractPartitionTimes();
 
                 // If there's processor metadata to be committed. We need to commit them to all
                 // input partitions
-                final Set<TopicPartition> partitionsNeedCommit = processorContext.getProcessorMetadata().needsCommit() ?
+                final Set<TopicPartition> partitionsNeedCommit = processorContext.processorMetadata().needsCommit() ?
                     inputPartitions() : consumedOffsets.keySet();
-                committableOffsets = new HashMap<>(partitionsNeedCommit.size());
 
-                for (final TopicPartition partition : partitionsNeedCommit) {
-                    final Long offset = findOffset(partition);
-                    final long partitionTime = partitionTimes.get(partition);
-                    committableOffsets.put(partition, new OffsetAndMetadata(offset,
-                        new TopicPartitionMetadata(partitionTime, processorContext.getProcessorMetadata()).encode()));
-                }
-                break;
+                return partitionsNeedCommit.stream()
+                        .map(partition -> findOffsetAndMetadata(partition)
+                                .map(offsetAndMetadata -> Map.entry(partition, offsetAndMetadata)))
+                        .filter(Optional::isPresent)
+                        .map(Optional::get)
+                        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
             case CLOSED:
                 throw new IllegalStateException("Illegal state " + state() + " while getting committable offsets for active task " + id);
@@ -514,7 +510,6 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                 throw new IllegalStateException("Unknown state " + state() + " while post committing active task " + id);
         }
 
-        return committableOffsets;
     }
 
     @Override
@@ -556,16 +551,9 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         commitNeeded = false;
         commitRequested = false;
         hasPendingTxCommit = false;
-        processorContext.getProcessorMetadata().setNeedsCommit(false);
+        processorContext.processorMetadata().setNeedsCommit(false);
     }
 
-    private Map<TopicPartition, Long> extractPartitionTimes() {
-        final Map<TopicPartition, Long> partitionTimes = new HashMap<>();
-        for (final TopicPartition partition : partitionGroup.partitions()) {
-            partitionTimes.put(partition, partitionGroup.partitionTimestamp(partition));
-        }
-        return partitionTimes;
-    }
 
     @Override
     public void closeClean() {
@@ -588,7 +576,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
     public void updateInputPartitions(final Set<TopicPartition> topicPartitions, final Map<String, List<String>> allTopologyNodesToSourceTopics) {
         super.updateInputPartitions(topicPartitions, allTopologyNodesToSourceTopics);
         partitionGroup.updatePartitions(topicPartitions, recordQueueCreator::createQueue);
-        processorContext.getProcessorMetadata().setNeedsCommit(true);
+        processorContext.processorMetadata().setNeedsCommit(true);
     }
 
     @Override
@@ -748,7 +736,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         }
         final boolean readyToProcess = partitionGroup.readyToProcess(wallClockTime);
         if (!readyToProcess) {
-            if (!timeCurrentIdlingStarted.isPresent()) {
+            if (timeCurrentIdlingStarted.isEmpty()) {
                 timeCurrentIdlingStarted = Optional.of(wallClockTime);
             }
         } else {
@@ -806,12 +794,16 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
             }
         } catch (final FailedProcessingException failedProcessingException) {
             // Do not keep the failed processing exception in the stack trace
-            handleException(failedProcessingException.getMessage(), failedProcessingException.getCause());
+            handleException(
+                failedProcessingException.getMessage(),
+                failedProcessingException.failedProcessorNodeName(),
+                failedProcessingException.getCause()
+            );
         } catch (final StreamsException exception) {
             record = null;
             throw exception;
         } catch (final RuntimeException e) {
-            handleException(e);
+            handleException(processorContext.currentNode().name(), e);
         } finally {
             processorContext.setCurrentNode(null);
         }
@@ -819,22 +811,23 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         return true;
     }
 
-    private void handleException(final Throwable originalException) {
+    private void handleException(final String failedProcessorNodeName, final Throwable originalException) {
         handleException(
             String.format(
                 "Exception caught in process. taskId=%s, processor=%s, topic=%s, partition=%d, offset=%d",
                 id(),
-                processorContext.currentNode().name(),
+                failedProcessorNodeName,
                 record.topic(),
                 record.partition(),
                 record.offset()
             ),
+            failedProcessorNodeName,
             originalException);
     }
 
-    private void handleException(final String errorMessage, final Throwable originalException) {
+    private void handleException(final String errorMessage, final String failedProcessorNodeName, final Throwable originalException) {
         if (errorMessage == null) {
-            handleException(originalException);
+            handleException(failedProcessorNodeName, originalException);
         }
 
         final StreamsException error = new StreamsException(errorMessage, originalException);
@@ -854,7 +847,9 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
             record.offset(),
             record.partition(),
             record.topic(),
-            record.headers()
+            record.headers(),
+            record.rawKey(),
+            record.rawValue()
         );
         updateProcessorContext(currNode, wallClockTime, recordContext);
 
@@ -936,7 +931,9 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                 recordContext.headers(),
                 node.name(),
                 id(),
-                recordContext.timestamp()
+                recordContext.timestamp(),
+                recordContext.sourceRawKey(),
+                recordContext.sourceRawValue()
             );
 
             final ProcessingExceptionHandler.ProcessingHandlerResponse response;
@@ -954,7 +951,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                     errorHandlerContext,
                     processingException
                 );
-                throw new FailedProcessingException("Fatal user code error in processing error callback", fatalUserException);
+                throw new FailedProcessingException("Fatal user code error in processing error callback", node.name(), fatalUserException);
             }
 
             if (response == ProcessingExceptionHandler.ProcessingHandlerResponse.FAIL) {
@@ -1025,7 +1022,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
             log.warn(
                 "Encountered {} while trying to fetch committed offsets, will retry initializing the metadata in the next loop." +
                     "\nConsider overwriting consumer config {} to a larger value to avoid timeout errors",
-                time.toString(),
+                timeoutException.toString(),
                 ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG);
 
             // re-throw to trigger `task.timeout.ms`
@@ -1113,6 +1110,10 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         if (newQueueSize > maxBufferedSize) {
             mainConsumer.pause(singleton(partition));
         }
+    }
+
+    public void updateNextOffsets(final TopicPartition partition, final OffsetAndMetadata offsetAndMetadata) {
+        nextOffsetsAndMetadataToBeConsumed.put(partition, offsetAndMetadata);
     }
 
     /**
@@ -1403,7 +1404,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                 );
             }
 
-            final TimestampExtractor sourceTimestampExtractor = source.getTimestampExtractor();
+            final TimestampExtractor sourceTimestampExtractor = source.timestampExtractor();
             final TimestampExtractor timestampExtractor = sourceTimestampExtractor != null ? sourceTimestampExtractor : defaultTimestampExtractor;
             return new RecordQueue(
                     partition,

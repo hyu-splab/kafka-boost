@@ -29,7 +29,6 @@ import org.apache.kafka.common.security.TestSecurityConfig;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.security.ssl.DefaultSslEngineFactory;
 import org.apache.kafka.common.security.ssl.SslFactory;
-import org.apache.kafka.common.utils.Java;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
@@ -56,7 +55,6 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -80,7 +78,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -147,10 +144,16 @@ public class SslTransportLayerTest {
             List<Arguments> parameters = new ArrayList<>();
             parameters.add(Arguments.of(new Args("TLSv1.2", false)));
             parameters.add(Arguments.of(new Args("TLSv1.2", true)));
-            if (Java.IS_JAVA11_COMPATIBLE) {
-                parameters.add(Arguments.of(new Args("TLSv1.3", false)));
-            }
+            parameters.add(Arguments.of(new Args("TLSv1.3", false)));
             return parameters.stream();
+        }
+    }
+
+    private static class SslTransportLayerArgumentsForTLS2Provider extends SslTransportLayerArgumentsProvider {
+
+        @Override
+        public Stream<? extends Arguments> provideArguments(ExtensionContext context) throws Exception {
+            return super.provideArguments(context).filter(arg -> ((Args) arg.get()[0]).tlsProtocol.equals("TLSv1.2"));
         }
     }
 
@@ -469,51 +472,15 @@ public class SslTransportLayerTest {
      * Tests key-pair created using DSA.
      */
     @ParameterizedTest
-    @ArgumentsSource(SslTransportLayerArgumentsProvider.class)
+    @ArgumentsSource(SslTransportLayerArgumentsForTLS2Provider.class)
     public void testDsaKeyPair(Args args) throws Exception {
         // DSA algorithms are not supported for TLSv1.3.
-        assumeTrue(args.tlsProtocol.equals("TLSv1.2"));
-        // Skip test if DSA is not supported by the JVM
-        assumeTrue(isDsaSupported(), "DSA algorithm is not supported by this JVM");
         args.serverCertStores = certBuilder(true, "server", args.useInlinePem).keyAlgorithm("DSA").build();
         args.clientCertStores = certBuilder(false, "client", args.useInlinePem).keyAlgorithm("DSA").build();
         args.sslServerConfigs = args.getTrustingConfig(args.serverCertStores, args.clientCertStores);
         args.sslClientConfigs = args.getTrustingConfig(args.clientCertStores, args.serverCertStores);
         args.sslServerConfigs.put(BrokerSecurityConfigs.SSL_CLIENT_AUTH_CONFIG, "required");
         verifySslConfigs(args);
-    }
-
-    /**
-     * Check if DSA algorithm is supported by the JVM and if there are compatible cipher suites
-     * available for TLSv1.2. This is important because even if DSA KeyPairGenerator is available,
-     * the SSL handshake may fail if no DSA-compatible cipher suites are available.
-     * @return true if DSA KeyPairGenerator is available and DSA-compatible cipher suites exist, false otherwise
-     */
-    private static boolean isDsaSupported() {
-        // First check if DSA KeyPairGenerator is available
-        try {
-            java.security.KeyPairGenerator.getInstance("DSA");
-        } catch (java.security.NoSuchAlgorithmException e) {
-            return false;
-        }
-
-        // Check if there are DSA-compatible cipher suites available for TLSv1.2
-        // DSA algorithms are not supported for TLSv1.3, so we only check TLSv1.2
-        try {
-            SSLContext context = SSLContext.getInstance("TLSv1.2");
-            context.init(null, null, null);
-            SSLParameters params = context.getDefaultSSLParameters();
-            String[] cipherSuites = params.getCipherSuites();
-
-            // Check if any cipher suite supports DSA
-            // In TLS standards and JVM implementations, DSA signature cipher suites use "_DSS_" naming
-            // Common patterns: TLS_DHE_DSS_*, TLS_DH_DSS_*, SSL_DHE_DSS_*, SSL_DH_DSS_*
-            return Arrays.stream(cipherSuites)
-                    .anyMatch(suite -> suite.contains("_DSS_"));
-        } catch (Exception e) {
-            // If we can't check cipher suites, assume DSA is not fully supported
-            return false;
-        }
     }
 
     /**
@@ -1129,14 +1096,14 @@ public class SslTransportLayerTest {
 
         CertStores invalidCertStores = certBuilder(true, "server", args.useInlinePem).addHostName("127.0.0.1").build();
         Map<String, Object>  invalidConfigs = args.getTrustingConfig(invalidCertStores, args.clientCertStores);
-        verifyInvalidReconfigure(reconfigurableBuilder, invalidConfigs, "keystore with different SubjectAltName");
+        verifyInvalidReconfigure(reconfigurableBuilder, invalidConfigs);
 
         Map<String, Object>  missingStoreConfigs = new HashMap<>();
         missingStoreConfigs.put(SslConfigs.SSL_KEYSTORE_TYPE_CONFIG, "PKCS12");
         missingStoreConfigs.put(SslConfigs.SSL_KEYSTORE_LOCATION_CONFIG, "some.keystore.path");
         missingStoreConfigs.put(SslConfigs.SSL_KEYSTORE_PASSWORD_CONFIG, new Password("some.keystore.password"));
         missingStoreConfigs.put(SslConfigs.SSL_KEY_PASSWORD_CONFIG, new Password("some.key.password"));
-        verifyInvalidReconfigure(reconfigurableBuilder, missingStoreConfigs, "keystore not found");
+        verifyInvalidReconfigure(reconfigurableBuilder, missingStoreConfigs);
 
         // Verify that new connections continue to work with the server with previously configured keystore after failed reconfiguration
         newClientSelector.connect("3", addr, BUFFER_SIZE, BUFFER_SIZE);
@@ -1200,7 +1167,7 @@ public class SslTransportLayerTest {
         for (String propName : CertStores.KEYSTORE_PROPS) {
             invalidKeystoreConfigs.put(propName, invalidConfig.get(propName));
         }
-        verifyInvalidReconfigure(reconfigurableBuilder, invalidKeystoreConfigs, "keystore without existing SubjectAltName");
+        verifyInvalidReconfigure(reconfigurableBuilder, invalidKeystoreConfigs);
         String node3 = "3";
         selector.connect(node3, addr, BUFFER_SIZE, BUFFER_SIZE);
         NetworkTestUtils.checkClientConnection(selector, node3, 100, 10);
@@ -1256,13 +1223,13 @@ public class SslTransportLayerTest {
 
         Map<String, Object>  invalidConfigs = new HashMap<>(newTruststoreConfigs);
         invalidConfigs.put(SslConfigs.SSL_TRUSTSTORE_TYPE_CONFIG, "INVALID_TYPE");
-        verifyInvalidReconfigure(reconfigurableBuilder, invalidConfigs, "invalid truststore type");
+        verifyInvalidReconfigure(reconfigurableBuilder, invalidConfigs);
 
         Map<String, Object>  missingStoreConfigs = new HashMap<>();
         missingStoreConfigs.put(SslConfigs.SSL_TRUSTSTORE_TYPE_CONFIG, "PKCS12");
         missingStoreConfigs.put(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG, "some.truststore.path");
         missingStoreConfigs.put(SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG, new Password("some.truststore.password"));
-        verifyInvalidReconfigure(reconfigurableBuilder, missingStoreConfigs, "truststore not found");
+        verifyInvalidReconfigure(reconfigurableBuilder, missingStoreConfigs);
 
         // Verify that new connections continue to work with the server with previously configured keystore after failed reconfiguration
         newClientSelector.connect("3", addr, BUFFER_SIZE, BUFFER_SIZE);
@@ -1313,7 +1280,7 @@ public class SslTransportLayerTest {
     }
 
     private void verifyInvalidReconfigure(ListenerReconfigurable reconfigurable,
-                                          Map<String, Object>  invalidConfigs, String errorMessage) {
+                                          Map<String, Object>  invalidConfigs) {
         assertThrows(KafkaException.class, () -> reconfigurable.validateReconfiguration(invalidConfigs));
         assertThrows(KafkaException.class, () -> reconfigurable.reconfigure(invalidConfigs));
     }
@@ -1389,7 +1356,7 @@ public class SslTransportLayerTest {
     }
 
     private Function<Short, ApiVersionsResponse> defaultApiVersionsSupplier() {
-        return version -> TestUtils.defaultApiVersionsResponse(ApiMessageType.ListenerType.ZK_BROKER);
+        return version -> TestUtils.defaultApiVersionsResponse(ApiMessageType.ListenerType.BROKER);
     }
 
     static class TestSslChannelBuilder extends SslChannelBuilder {

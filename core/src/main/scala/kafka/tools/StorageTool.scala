@@ -20,22 +20,22 @@ import kafka.server.KafkaConfig
 
 import java.io.PrintStream
 import java.nio.file.{Files, Paths}
-import kafka.utils.{Exit, Logging}
+import kafka.utils.Logging
 import net.sourceforge.argparse4j.ArgumentParsers
 import net.sourceforge.argparse4j.impl.Arguments.{append, store, storeTrue}
-import net.sourceforge.argparse4j.inf.{ArgumentParserException, Namespace}
+import net.sourceforge.argparse4j.inf.{ArgumentParserException, Namespace, Subparser, Subparsers}
 import net.sourceforge.argparse4j.internal.HelpScreenException
 import org.apache.kafka.common.Uuid
-import org.apache.kafka.common.utils.Utils
-import org.apache.kafka.server.common.MetadataVersion
+import org.apache.kafka.common.utils.{Exit, Utils}
+import org.apache.kafka.server.common.{Feature, MetadataVersion}
 import org.apache.kafka.metadata.properties.{MetaProperties, MetaPropertiesEnsemble, MetaPropertiesVersion, PropertiesUtils}
 import org.apache.kafka.metadata.storage.{Formatter, FormatterException}
 import org.apache.kafka.raft.{DynamicVoters, QuorumConfig}
 import org.apache.kafka.server.ProcessRole
-import org.apache.kafka.server.config.ReplicationConfigs
 
 import java.util
 import scala.collection.mutable
+import scala.jdk.CollectionConverters.{ListHasAsScala, MapHasAsScala}
 
 object StorageTool extends Logging {
 
@@ -53,7 +53,7 @@ object StorageTool extends Logging {
         message = Some(e.getMessage)
     }
     message.foreach(System.err.println)
-    Exit.exit(exitCode, message)
+    Exit.exit(exitCode, message.orNull)
   }
 
   /**
@@ -86,9 +86,18 @@ object StorageTool extends Logging {
         runFormatCommand(namespace, config.get, printStream)
         0
 
+      case "version-mapping" =>
+        runVersionMappingCommand(namespace, printStream, Feature.PRODUCTION_FEATURES)
+        0
+
+      case "feature-dependencies" =>
+        runFeatureDependenciesCommand(namespace, printStream, Feature.PRODUCTION_FEATURES)
+        0
+
       case "random-uuid" =>
         printStream.println(Uuid.randomUuid)
         0
+
       case _ =>
         throw new RuntimeException(s"Unknown command $command")
     }
@@ -117,20 +126,18 @@ object StorageTool extends Logging {
       setClusterId(namespace.getString("cluster_id")).
       setUnstableFeatureVersionsEnabled(config.unstableFeatureVersionsEnabled).
       setIgnoreFormatted(namespace.getBoolean("ignore_formatted")).
-      setControllerListenerName(config.controllerListenerNames.head).
+      setControllerListenerName(config.controllerListenerNames.get(0)).
       setMetadataLogDirectory(config.metadataLogDir)
-    Option(namespace.getString("release_version")) match {
-      case Some(releaseVersion) => formatter.setReleaseVersion(MetadataVersion.fromVersionString(releaseVersion))
-      case None => Option(config.originals.get(ReplicationConfigs.INTER_BROKER_PROTOCOL_VERSION_CONFIG)).
-        foreach(v => formatter.setReleaseVersion(MetadataVersion.fromVersionString(v.toString)))
-    }
+    Option(namespace.getString("release_version")).foreach(
+      releaseVersion => formatter.
+        setReleaseVersion(MetadataVersion.fromVersionString(releaseVersion)))
     Option(namespace.getList[String]("feature")).foreach(
-      featureNamesAndLevels(_).foreach {
-        kv => formatter.setFeatureLevel(kv._1, kv._2)
+      featureNamesAndLevels(_).foreachEntry {
+        (k, v) => formatter.setFeatureLevel(k, v)
       })
     val initialControllers = namespace.getString("initial_controllers")
     val isStandalone = namespace.getBoolean("standalone")
-    val staticVotersEmpty = config.quorumVoters.isEmpty
+    val staticVotersEmpty = config.quorumConfig.voters().isEmpty
     formatter.setHasDynamicQuorum(staticVotersEmpty)
     if (!staticVotersEmpty && (Option(initialControllers).isDefined || isStandalone)) {
       throw new TerseFailure("You cannot specify " +
@@ -148,7 +155,7 @@ object StorageTool extends Logging {
     if (!namespace.getBoolean("no_initial_controllers") &&
       config.processRoles.contains(ProcessRole.ControllerRole) &&
       staticVotersEmpty &&
-      !formatter.initialVoters().isPresent) {
+      formatter.initialVoters().isEmpty) {
           throw new TerseFailure("Because " + QuorumConfig.QUORUM_VOTERS_CONFIG +
             " is not set on this controller, you must specify one of the following: " +
             "--standalone, --initial-controllers, or --no-initial-controllers.");
@@ -157,6 +164,95 @@ object StorageTool extends Logging {
       foreach(scramArgs => formatter.setScramArguments(scramArgs.asInstanceOf[util.List[String]]))
     configToLogDirectories(config).foreach(formatter.addDirectory(_))
     formatter.run()
+  }
+
+  /**
+   * Maps the given release version to the corresponding metadata version
+   * and prints the corresponding features.
+   *
+   * @param namespace       Arguments containing the release version.
+   * @param printStream     The print stream to output the version mapping.
+   * @param validFeatures   List of features to be considered in the output
+   */
+  def runVersionMappingCommand(
+    namespace: Namespace,
+    printStream: PrintStream,
+    validFeatures: java.util.List[Feature]
+  ): Unit = {
+    val releaseVersion = Option(namespace.getString("release_version")).getOrElse(MetadataVersion.LATEST_PRODUCTION.toString)
+    try {
+      val metadataVersion = MetadataVersion.fromVersionString(releaseVersion)
+
+      val metadataVersionLevel = metadataVersion.featureLevel()
+      printStream.print(f"metadata.version=$metadataVersionLevel%d ($releaseVersion%s)%n")
+
+      for (feature <- validFeatures.asScala) {
+        val featureLevel = feature.defaultLevel(metadataVersion)
+        printStream.print(f"${feature.featureName}%s=$featureLevel%d%n")
+      }
+    } catch {
+      case e: IllegalArgumentException =>
+        throw new TerseFailure(s"Unknown release version '$releaseVersion'. Supported versions are: " +
+          s"${MetadataVersion.MINIMUM_VERSION.version} to ${MetadataVersion.LATEST_PRODUCTION.version}")
+    }
+  }
+
+  def runFeatureDependenciesCommand(
+    namespace: Namespace,
+    printStream: PrintStream,
+    validFeatures: java.util.List[Feature]
+  ): Unit = {
+    val featureArgs = Option(namespace.getList[String]("feature")).map(_.asScala.toList).getOrElse(List.empty)
+
+    // Iterate over each feature specified with --feature
+    for (featureArg <- featureArgs) {
+      val Array(featureName, versionStr) = featureArg.split("=")
+
+      val featureLevel = try {
+        versionStr.toShort
+      } catch {
+        case _: NumberFormatException =>
+          throw new TerseFailure(s"Invalid version format: $versionStr for feature $featureName")
+      }
+
+      if (featureName == MetadataVersion.FEATURE_NAME) {
+        val metadataVersion = try {
+          MetadataVersion.fromFeatureLevel(featureLevel)
+        } catch {
+          case _: IllegalArgumentException =>
+            throw new TerseFailure(s"Unknown metadata.version $featureLevel")
+        }
+        printStream.printf("%s=%d (%s) has no dependencies.%n", featureName, featureLevel, metadataVersion.version())
+      } else {
+        validFeatures.asScala.find(_.featureName == featureName) match {
+          case Some(feature) =>
+            val featureVersion = try {
+              feature.fromFeatureLevel(featureLevel, true)
+            } catch {
+              case _: IllegalArgumentException =>
+                throw new TerseFailure(s"Feature level $featureLevel is not supported for feature $featureName")
+            }
+            val dependencies = featureVersion.dependencies().asScala
+
+            if (dependencies.isEmpty) {
+              printStream.printf("%s=%d has no dependencies.%n", featureName, featureLevel)
+            } else {
+              printStream.printf("%s=%d requires:%n", featureName, featureLevel)
+              for ((depFeature, depLevel) <- dependencies) {
+                if (depFeature == MetadataVersion.FEATURE_NAME) {
+                  val metadataVersion = MetadataVersion.fromFeatureLevel(depLevel)
+                  printStream.println(s"    $depFeature=$depLevel (${metadataVersion.version()})")
+                } else {
+                  printStream.println(s"    $depFeature=$depLevel")
+                }
+              }
+            }
+
+          case None =>
+            throw new TerseFailure(s"Unknown feature: $featureName")
+        }
+      }
+    }
   }
 
   def createStandaloneDynamicVoters(
@@ -178,41 +274,58 @@ object StorageTool extends Logging {
   }
 
   def parseArguments(args: Array[String]): Namespace = {
-    val parser = ArgumentParsers.
-      newArgumentParser("kafka-storage", /* defaultHelp */ true, /* prefixChars */ "-", /* fromFilePrefix */ "@").
-      description("The Kafka storage tool.")
+    val parser = ArgumentParsers
+      .newArgumentParser("kafka-storage", /* defaultHelp */true, /* prefixChars */"-", /* fromFilePrefix */ "@")
+      .description("The Kafka storage tool.")
 
     val subparsers = parser.addSubparsers().dest("command")
 
-    val infoParser = subparsers.addParser("info").
-      help("Get information about the Kafka log directories on this node.")
-    val formatParser = subparsers.addParser("format").
-      help("Format the Kafka log directories on this node.")
-    subparsers.addParser("random-uuid").help("Print a random UUID.")
-    List(infoParser, formatParser).foreach(parser => {
-      parser.addArgument("--config", "-c").
-        action(store()).
-        required(true).
-        help("The Kafka configuration file to use.")
-    })
-    formatParser.addArgument("--cluster-id", "-t").
-      action(store()).
-      required(true).
-      help("The cluster ID to use.")
-    formatParser.addArgument("--add-scram", "-S").
-      action(append()).
-      help("""A SCRAM_CREDENTIAL to add to the __cluster_metadata log e.g.
+    addInfoParser(subparsers)
+    addFormatParser(subparsers)
+    addVersionMappingParser(subparsers)
+    addFeatureDependenciesParser(subparsers)
+    addRandomUuidParser(subparsers)
+
+    parser.parseArgs(args)
+  }
+
+  private def addInfoParser(subparsers: Subparsers): Unit = {
+    val infoParser = subparsers.addParser("info")
+      .help("Get information about the Kafka log directories on this node.")
+
+    addConfigArguments(infoParser)
+  }
+
+  private def addFormatParser(subparsers: Subparsers): Unit = {
+    val formatParser = subparsers.addParser("format")
+      .help("Format the Kafka log directories on this node.")
+
+    addConfigArguments(formatParser)
+
+    formatParser.addArgument("--cluster-id", "-t")
+      .action(store())
+      .required(true)
+      .help("The cluster ID to use.")
+
+    formatParser.addArgument("--add-scram", "-S")
+      .action(append())
+      .help("""A SCRAM_CREDENTIAL to add to the __cluster_metadata log e.g.
               |'SCRAM-SHA-256=[name=alice,password=alice-secret]'
               |'SCRAM-SHA-512=[name=alice,iterations=8192,salt="N3E=",saltedpassword="YCE="]'""".stripMargin)
-    formatParser.addArgument("--ignore-formatted", "-g").
-      action(storeTrue())
-    formatParser.addArgument("--release-version", "-r").
-      action(store()).
-      help(s"The release version to use for the initial feature settings. The minimum is " +
-        s"${MetadataVersion.IBP_3_0_IV0}; the default is ${MetadataVersion.LATEST_PRODUCTION}")
-    formatParser.addArgument("--feature", "-f").
-      help("The setting to use for a specific feature, in feature=level format. For example: `kraft.version=1`.").
-      action(append())
+
+    formatParser.addArgument("--ignore-formatted", "-g")
+      .help("When this option is passed, the format command will skip over already formatted directories rather than failing.")
+      .action(storeTrue())
+
+    formatParser.addArgument("--release-version", "-r")
+      .action(store())
+      .help(s"The release version to use for the initial feature settings. The minimum is " +
+        s"${MetadataVersion.MINIMUM_VERSION}; the default is ${MetadataVersion.LATEST_PRODUCTION}")
+
+    formatParser.addArgument("--feature", "-f")
+      .help("The setting to use for a specific feature, in feature=level format. For example: `kraft.version=1`.")
+      .action(append())
+
     val reconfigurableQuorumOptions = formatParser.addMutuallyExclusiveGroup()
     reconfigurableQuorumOptions.addArgument("--standalone", "-s")
       .help("Used to initialize a controller as a single-node dynamic quorum. When setting this flag, " +
@@ -231,12 +344,51 @@ object StorageTool extends Logging {
         "MvDxzVmcRsaTz33bUuRU6A,2@example.com:8084:07R5amHmR32VDA6jHkGbTA\n. When setting this flag, " +
         "the controller.quorum.voters config must not be set, and controller.quorum.bootstrap.servers is set instead.")
       .action(store())
-    parser.parseArgs(args)
+  }
+
+  private def addVersionMappingParser(subparsers: Subparsers): Unit = {
+    val versionMappingParser = subparsers.addParser("version-mapping")
+      .help("Look up the corresponding features for a given metadata version. " +
+        "Using the command with no --release-version  argument will return the mapping for " +
+        "the latest stable metadata version"
+      )
+
+    versionMappingParser.addArgument("--release-version", "-r")
+      .action(store())
+      .help(s"The release version to use for the corresponding feature mapping. The minimum is " +
+        s"${MetadataVersion.MINIMUM_VERSION}; the default is ${MetadataVersion.LATEST_PRODUCTION}")
+  }
+
+  private def addFeatureDependenciesParser(subparsers: Subparsers): Unit = {
+    val featureDependenciesParser = subparsers.addParser("feature-dependencies")
+      .help("Look up dependencies for a given feature version. " +
+        "If the feature is not known or the version not yet defined, an error is thrown. " +
+        "Multiple features can be specified."
+      )
+
+    featureDependenciesParser.addArgument("--feature", "-f")
+      .required(true)
+      .help("The features and their versions to look up dependencies for, in feature=version format." +
+        " For example: `metadata.version=5`."
+      )
+      .action(append())
+  }
+
+  private def addRandomUuidParser(subparsers: Subparsers): Unit = {
+    subparsers.addParser("random-uuid")
+      .help("Print a random UUID.")
+  }
+
+  private def addConfigArguments(parser: Subparser): Unit = {
+    parser.addArgument("--config", "-c")
+      .action(store())
+      .required(true)
+      .help("The Kafka configuration file to use.")
   }
 
   def configToLogDirectories(config: KafkaConfig): Seq[String] = {
     val directories = new mutable.TreeSet[String]
-    directories ++= config.logDirs
+    directories ++= config.logDirs.asScala
     Option(config.metadataLogDir).foreach(directories.add)
     directories.toSeq
   }
@@ -343,9 +495,7 @@ object StorageTool extends Logging {
   }
 
   def featureNamesAndLevels(features: java.util.List[String]): Map[String, java.lang.Short] = {
-    val scalaFeatures = new mutable.ArrayBuffer[String]
-    features.forEach(scalaFeatures += _)
-    scalaFeatures.map { (feature: String) =>
+    features.asScala.map { (feature: String) =>
       // Ensure the feature exists
       val nameAndLevel = parseNameAndLevel(feature)
       (nameAndLevel._1, nameAndLevel._2)

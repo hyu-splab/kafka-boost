@@ -30,7 +30,6 @@ import org.apache.kafka.common.security.ssl.DefaultSslEngineFactory.SecurityStor
 import org.apache.kafka.common.security.ssl.mock.TestKeyManagerFactory;
 import org.apache.kafka.common.security.ssl.mock.TestProviderCreator;
 import org.apache.kafka.common.security.ssl.mock.TestTrustManagerFactory;
-import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.test.TestSslUtils;
 import org.apache.kafka.test.TestUtils;
 
@@ -47,6 +46,7 @@ import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
@@ -81,7 +81,7 @@ public abstract class SslFactoryTest {
             //host and port are hints
             SSLEngine engine = sslFactory.createSslEngine("localhost", 0);
             assertNotNull(engine);
-            assertEquals(Utils.mkSet(tlsProtocol), Utils.mkSet(engine.getEnabledProtocols()));
+            assertEquals(Set.of(tlsProtocol), Set.of(engine.getEnabledProtocols()));
             assertFalse(engine.getUseClientMode());
         }
     }
@@ -95,7 +95,7 @@ public abstract class SslFactoryTest {
             sslFactory.configure(serverSslConfig);
             SSLEngine engine = sslFactory.createSslEngine("localhost", 0);
             assertNotNull(engine);
-            assertEquals(Utils.mkSet(tlsProtocol), Utils.mkSet(engine.getEnabledProtocols()));
+            assertEquals(Set.of(tlsProtocol), Set.of(engine.getEnabledProtocols()));
             assertFalse(engine.getUseClientMode());
         }
     }
@@ -359,7 +359,6 @@ public abstract class SslFactoryTest {
         sslConfig = new TestSecurityConfig(props);
         sslFactory.reconfigure(sslConfig.values());
         assertNotSame(sslEngineFactory, sslFactory.sslEngineFactory(), "SslEngineFactory not recreated");
-        sslEngineFactory = sslFactory.sslEngineFactory();
     }
 
     @Test
@@ -400,15 +399,15 @@ public abstract class SslFactoryTest {
 
     @Test
     public void testKeystoreVerifiableUsingTruststore() throws Exception {
-        verifyKeystoreVerifiableUsingTruststore(false, tlsProtocol);
+        verifyKeystoreVerifiableUsingTruststore(false);
     }
 
     @Test
     public void testPemKeystoreVerifiableUsingTruststore() throws Exception {
-        verifyKeystoreVerifiableUsingTruststore(true, tlsProtocol);
+        verifyKeystoreVerifiableUsingTruststore(true);
     }
 
-    private void verifyKeystoreVerifiableUsingTruststore(boolean usePem, String tlsProtocol) throws Exception {
+    private void verifyKeystoreVerifiableUsingTruststore(boolean usePem) throws Exception {
         File trustStoreFile1 = usePem ? null : TestUtils.tempFile("truststore1", ".jks");
         Map<String, Object> sslConfig1 = sslConfigsBuilder(ConnectionMode.SERVER)
                 .createNewTrustStore(trustStoreFile1)
@@ -436,15 +435,15 @@ public abstract class SslFactoryTest {
 
     @Test
     public void testCertificateEntriesValidation() throws Exception {
-        verifyCertificateEntriesValidation(false, tlsProtocol);
+        verifyCertificateEntriesValidation(false);
     }
 
     @Test
     public void testPemCertificateEntriesValidation() throws Exception {
-        verifyCertificateEntriesValidation(true, tlsProtocol);
+        verifyCertificateEntriesValidation(true);
     }
 
-    private void verifyCertificateEntriesValidation(boolean usePem, String tlsProtocol) throws Exception {
+    private void verifyCertificateEntriesValidation(boolean usePem) throws Exception {
         File trustStoreFile = usePem ? null : TestUtils.tempFile("truststore", ".jks");
         Map<String, Object> serverSslConfig = sslConfigsBuilder(ConnectionMode.SERVER)
                 .createNewTrustStore(trustStoreFile)

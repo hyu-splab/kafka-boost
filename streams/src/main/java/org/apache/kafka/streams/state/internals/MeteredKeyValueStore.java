@@ -23,9 +23,9 @@ import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.errors.ProcessorStateException;
+import org.apache.kafka.streams.internals.metrics.OpenIterators;
 import org.apache.kafka.streams.kstream.internals.Change;
 import org.apache.kafka.streams.kstream.internals.WrappingNullableUtils;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.TaskId;
@@ -49,20 +49,14 @@ import org.apache.kafka.streams.state.internals.StoreQueryUtils.QueryHandler;
 import org.apache.kafka.streams.state.internals.metrics.StateStoreMetrics;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.NavigableSet;
-import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentSkipListSet;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 
 import static org.apache.kafka.common.utils.Utils.mkEntry;
 import static org.apache.kafka.common.utils.Utils.mkMap;
 import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency;
-import static org.apache.kafka.streams.state.internals.StoreQueryUtils.getDeserializeValue;
 
 /**
  * A Metered {@link KeyValueStore} wrapper that is used for recording operation metrics, and hence its
@@ -94,12 +88,11 @@ public class MeteredKeyValueStore<K, V>
     private Sensor flushSensor;
     private Sensor e2eLatencySensor;
     protected Sensor iteratorDurationSensor;
-    protected InternalProcessorContext context;
+    protected InternalProcessorContext<?, ?> internalContext;
     private StreamsMetricsImpl streamsMetrics;
     private TaskId taskId;
 
-    protected LongAdder numOpenIterators = new LongAdder();
-    protected NavigableSet<MeteredIterator> openIterators = new ConcurrentSkipListSet<>(Comparator.comparingLong(MeteredIterator::startTimestamp));
+    protected OpenIterators openIterators;
 
     @SuppressWarnings("rawtypes")
     private final Map<Class, QueryHandler> queryHandlers =
@@ -126,37 +119,20 @@ public class MeteredKeyValueStore<K, V>
         this.valueSerde = valueSerde;
     }
 
-    @Deprecated
     @Override
-    public void init(final ProcessorContext context,
+    public void init(final StateStoreContext stateStoreContext,
                      final StateStore root) {
-        this.context = context instanceof InternalProcessorContext ? (InternalProcessorContext) context : null;
-        taskId = context.taskId();
-        initStoreSerde(context);
-        streamsMetrics = (StreamsMetricsImpl) context.metrics();
+        internalContext = stateStoreContext instanceof InternalProcessorContext ? (InternalProcessorContext<?, ?>) stateStoreContext : null;
+        taskId = stateStoreContext.taskId();
+        initStoreSerde(stateStoreContext);
+        streamsMetrics = (StreamsMetricsImpl) stateStoreContext.metrics();
 
         registerMetrics();
         final Sensor restoreSensor =
             StateStoreMetrics.restoreSensor(taskId.toString(), metricsScope, name(), streamsMetrics);
 
         // register and possibly restore the state from the logs
-        maybeMeasureLatency(() -> super.init(context, root), time, restoreSensor);
-    }
-
-    @Override
-    public void init(final StateStoreContext context,
-                     final StateStore root) {
-        this.context = context instanceof InternalProcessorContext ? (InternalProcessorContext<?, ?>) context : null;
-        taskId = context.taskId();
-        initStoreSerde(context);
-        streamsMetrics = (StreamsMetricsImpl) context.metrics();
-
-        registerMetrics();
-        final Sensor restoreSensor =
-            StateStoreMetrics.restoreSensor(taskId.toString(), metricsScope, name(), streamsMetrics);
-
-        // register and possibly restore the state from the logs
-        maybeMeasureLatency(() -> super.init(context, root), time, restoreSensor);
+        maybeMeasureLatency(() -> super.init(stateStoreContext, root), time, restoreSensor);
     }
 
     private void registerMetrics() {
@@ -172,29 +148,12 @@ public class MeteredKeyValueStore<K, V>
         e2eLatencySensor = StateStoreMetrics.e2ELatencySensor(taskId.toString(), metricsScope, name(), streamsMetrics);
         iteratorDurationSensor = StateStoreMetrics.iteratorDurationSensor(taskId.toString(), metricsScope, name(), streamsMetrics);
         StateStoreMetrics.addNumOpenIteratorsGauge(taskId.toString(), metricsScope, name(), streamsMetrics,
-                (config, now) -> numOpenIterators.sum());
-        StateStoreMetrics.addOldestOpenIteratorGauge(taskId.toString(), metricsScope, name(), streamsMetrics,
-                (config, now) -> {
-                    try {
-                        return openIterators.isEmpty() ? null : openIterators.first().startTimestamp();
-                    } catch (final NoSuchElementException ignored) {
-                        return null;
-                    }
-                }
-        );
+                (config, now) -> openIterators.sum());
+        openIterators = new OpenIterators(taskId, metricsScope, name(), streamsMetrics);
     }
 
     protected Serde<V> prepareValueSerdeForStore(final Serde<V> valueSerde, final SerdeGetter getter) {
         return WrappingNullableUtils.prepareValueSerde(valueSerde, getter);
-    }
-
-
-    @Deprecated
-    protected void initStoreSerde(final ProcessorContext context) {
-        final String storeName = name();
-        final String changelogTopic = ProcessorContextUtils.changelogFor(context, storeName, Boolean.FALSE);
-        serdes = StoreSerdeInitializer.prepareStoreSerde(
-            context, storeName, changelogTopic, keySerde, valueSerde, this::prepareValueSerdeForStore);
     }
 
     protected void initStoreSerde(final StateStoreContext context) {
@@ -287,7 +246,7 @@ public class MeteredKeyValueStore<K, V>
             final KeyValueIterator<K, V> resultIterator = new MeteredKeyValueTimestampedIterator(
                 iterator,
                 getSensor,
-                getDeserializeValue(serdes, wrapped())
+                StoreQueryUtils.deserializeValue(serdes, wrapped())
             );
             final QueryResult<KeyValueIterator<K, V>> typedQueryResult =
                 InternalQueryResultUtil.copyAndSubstituteDeserializedResult(
@@ -313,7 +272,7 @@ public class MeteredKeyValueStore<K, V>
         final QueryResult<byte[]> rawResult =
             wrapped().query(rawKeyQuery, positionBound, config);
         if (rawResult.isSuccess()) {
-            final Function<byte[], V> deserializer = getDeserializeValue(serdes, wrapped());
+            final Function<byte[], V> deserializer = StoreQueryUtils.deserializeValue(serdes, wrapped());
             final V value = deserializer.apply(rawResult.getResult());
             final QueryResult<V> typedQueryResult =
                 InternalQueryResultUtil.copyAndSubstituteDeserializedResult(rawResult, value);
@@ -456,9 +415,9 @@ public class MeteredKeyValueStore<K, V>
     protected void maybeRecordE2ELatency() {
         // Context is null if the provided context isn't an implementation of InternalProcessorContext.
         // In that case, we _can't_ get the current timestamp, so we don't record anything.
-        if (e2eLatencySensor.shouldRecord() && context != null) {
+        if (e2eLatencySensor.shouldRecord() && internalContext != null) {
             final long currentTime = time.milliseconds();
-            final long e2eLatency =  currentTime - context.timestamp();
+            final long e2eLatency =  currentTime - internalContext.timestamp();
             e2eLatencySensor.record(e2eLatency, currentTime);
         }
     }
@@ -476,7 +435,6 @@ public class MeteredKeyValueStore<K, V>
             this.sensor = sensor;
             this.startTimestamp = time.milliseconds();
             this.startNs = time.nanoseconds();
-            numOpenIterators.increment();
             openIterators.add(this);
         }
 
@@ -506,7 +464,6 @@ public class MeteredKeyValueStore<K, V>
                 final long duration = time.nanoseconds() - startNs;
                 sensor.record(duration);
                 iteratorDurationSensor.record(duration);
-                numOpenIterators.decrement();
                 openIterators.remove(this);
             }
         }
@@ -525,15 +482,16 @@ public class MeteredKeyValueStore<K, V>
         private final long startTimestamp;
         private final Function<byte[], V> valueDeserializer;
 
-        private MeteredKeyValueTimestampedIterator(final KeyValueIterator<Bytes, byte[]> iter,
-                                        final Sensor sensor,
-                                        final Function<byte[], V> valueDeserializer) {
+        private MeteredKeyValueTimestampedIterator(
+            final KeyValueIterator<Bytes, byte[]> iter,
+            final Sensor sensor,
+            final Function<byte[], V> valueDeserializer
+        ) {
             this.iter = iter;
             this.sensor = sensor;
             this.valueDeserializer = valueDeserializer;
             this.startTimestamp = time.milliseconds();
             this.startNs = time.nanoseconds();
-            numOpenIterators.increment();
             openIterators.add(this);
         }
 
@@ -563,7 +521,6 @@ public class MeteredKeyValueStore<K, V>
                 final long duration = time.nanoseconds() - startNs;
                 sensor.record(duration);
                 iteratorDurationSensor.record(duration);
-                numOpenIterators.decrement();
                 openIterators.remove(this);
             }
         }

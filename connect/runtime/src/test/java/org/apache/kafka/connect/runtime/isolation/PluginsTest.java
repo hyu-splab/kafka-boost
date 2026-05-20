@@ -61,6 +61,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.stream.Collectors;
@@ -69,7 +70,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -186,8 +186,7 @@ public class PluginsTest {
         assertNotNull(connectRestExtensions);
         assertEquals(1, connectRestExtensions.size(), "One Rest Extension expected");
         assertNotNull(connectRestExtensions.get(0));
-        assertTrue(connectRestExtensions.get(0) instanceof TestConnectRestExtension,
-            "Should be instance of TestConnectRestExtension");
+        assertInstanceOf(TestConnectRestExtension.class, connectRestExtensions.get(0), "Should be instance of TestConnectRestExtension");
         assertNotNull(((TestConnectRestExtension) connectRestExtensions.get(0)).configs);
         assertEquals(config.originals(),
                      ((TestConnectRestExtension) connectRestExtensions.get(0)).configs);
@@ -198,16 +197,9 @@ public class PluginsTest {
         props.remove(WorkerConfig.HEADER_CONVERTER_CLASS_CONFIG);
         createConfig();
 
-        // Because it's not explicitly set on the supplied configuration, the logic to use the current classloader for the connector
-        // will exit immediately, and so this method always returns null
         HeaderConverter headerConverter = plugins.newHeaderConverter(config,
-                                                                     WorkerConfig.HEADER_CONVERTER_CLASS_CONFIG,
-                                                                     ClassLoaderUsage.CURRENT_CLASSLOADER);
-        assertNull(headerConverter);
-        // But we should always find it (or the worker's default) when using the plugins classloader ...
-        headerConverter = plugins.newHeaderConverter(config,
                                                      WorkerConfig.HEADER_CONVERTER_CLASS_CONFIG,
-                                                     ClassLoaderUsage.PLUGINS);
+                                                     ClassLoaderUsage.CURRENT_CLASSLOADER);
         assertNotNull(headerConverter);
         assertInstanceOf(SimpleHeaderConverter.class, headerConverter);
     }
@@ -364,7 +356,7 @@ public class PluginsTest {
     @Test
     public void newConverterShouldConfigureWithPluginClassLoader() {
         props.put(WorkerConfig.KEY_CONVERTER_CLASS_CONFIG, TestPlugin.SAMPLING_CONVERTER.className());
-        ClassLoader classLoader = plugins.delegatingLoader().pluginClassLoader(TestPlugin.SAMPLING_CONVERTER.className());
+        ClassLoader classLoader = plugins.delegatingLoader().pluginClassLoader(TestPlugin.SAMPLING_CONVERTER.className(), null, Optional.empty());
         try (LoaderSwap loaderSwap = plugins.withClassLoader(classLoader)) {
             createConfig();
         }
@@ -386,7 +378,7 @@ public class PluginsTest {
         String providerPrefix = "some.provider";
         props.put(providerPrefix + ".class", TestPlugin.SAMPLING_CONFIG_PROVIDER.className());
 
-        PluginClassLoader classLoader = plugins.delegatingLoader().pluginClassLoader(TestPlugin.SAMPLING_CONFIG_PROVIDER.className());
+        PluginClassLoader classLoader = plugins.delegatingLoader().pluginClassLoader(TestPlugin.SAMPLING_CONFIG_PROVIDER.className(), null, Optional.empty());
         assertNotNull(classLoader);
         try (LoaderSwap loaderSwap = plugins.withClassLoader(classLoader)) {
             createConfig();
@@ -407,7 +399,7 @@ public class PluginsTest {
     @Test
     public void newHeaderConverterShouldConfigureWithPluginClassLoader() {
         props.put(WorkerConfig.HEADER_CONVERTER_CLASS_CONFIG, TestPlugin.SAMPLING_HEADER_CONVERTER.className());
-        ClassLoader classLoader = plugins.delegatingLoader().pluginClassLoader(TestPlugin.SAMPLING_HEADER_CONVERTER.className());
+        ClassLoader classLoader = plugins.delegatingLoader().pluginClassLoader(TestPlugin.SAMPLING_HEADER_CONVERTER.className(), null, Optional.empty());
         try (LoaderSwap loaderSwap = plugins.withClassLoader(classLoader)) {
             createConfig();
         }
@@ -599,7 +591,7 @@ public class PluginsTest {
 
     @Test
     public void testAliasesInConverters() throws ClassNotFoundException {
-        ClassLoader connectorLoader = plugins.connectorLoader(TestPlugin.SAMPLING_CONNECTOR.className());
+        ClassLoader connectorLoader = plugins.connectorLoader(TestPlugin.SAMPLING_CONNECTOR.className(), null);
         try (LoaderSwap loaderSwap = plugins.withClassLoader(connectorLoader)) {
             String configKey = "config.key";
             String alias = "SamplingConverter";

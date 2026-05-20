@@ -53,7 +53,6 @@ import java.util.function.Supplier;
 
 import static org.apache.kafka.common.utils.Utils.mkEntry;
 import static org.apache.kafka.common.utils.Utils.mkMap;
-import static org.apache.kafka.common.utils.Utils.mkSet;
 import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.CHANGELOG_TOPIC_PREFIX;
 import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.EMPTY_RACK_AWARE_ASSIGNMENT_TAGS;
 import static org.apache.kafka.streams.processor.internals.assignment.AssignmentTestUtils.RACK_PREFIX;
@@ -123,7 +122,7 @@ public class TaskAssignorConvergenceTest {
                     partitionInfoSet.add(new PartitionInfo(TOPIC_PREFIX + "_" + subtopology, i, replica[0], replica, replica));
                     nodeIndex++;
 
-                    partitionsForTask.put(taskId, mkSet(new TopicPartition(TOPIC_PREFIX + "_" + subtopology, i)));
+                    partitionsForTask.put(taskId, Set.of(new TopicPartition(TOPIC_PREFIX + "_" + subtopology, i)));
                     tasksForTopicGroup.computeIfAbsent(new Subtopology(subtopology, null), k -> new HashSet<>()).add(taskId);
                 }
                 subtopology++;
@@ -146,8 +145,8 @@ public class TaskAssignorConvergenceTest {
                     partitionInfoSet.add(new PartitionInfo(TOPIC_PREFIX + "_" + subtopology, i, replica[0], replica, replica));
                     nodeIndex++;
 
-                    partitionsForTask.put(taskId, mkSet(new TopicPartition(TOPIC_PREFIX + "_" + subtopology, i)));
-                    changelogPartitionsForTask.put(taskId, mkSet(new TopicPartition(changelogTopicName, i)));
+                    partitionsForTask.put(taskId, Set.of(new TopicPartition(TOPIC_PREFIX + "_" + subtopology, i)));
+                    changelogPartitionsForTask.put(taskId, Set.of(new TopicPartition(changelogTopicName, i)));
                     tasksForTopicGroup.computeIfAbsent(new Subtopology(subtopology, null), k -> new HashSet<>()).add(taskId);
 
                     final int changelogNodeIndex = random.nextInt(nodes.size());
@@ -426,7 +425,7 @@ public class TaskAssignorConvergenceTest {
         testForConvergence(harness, configs, numStatefulTasks / maxWarmupReplicas + 1);
         verifyValidAssignment(numStandbyReplicas, harness);
 
-        // min-cost rack aware assignor doesn't balance subtopolgy
+        // min-cost rack aware assignor doesn't balance subtopology
         if (!rackAwareStrategy.equals(StreamsConfig.RACK_AWARE_ASSIGNMENT_STRATEGY_MIN_TRAFFIC)) {
             verifyBalancedAssignment(harness, skewThreshold);
         }
@@ -464,7 +463,7 @@ public class TaskAssignorConvergenceTest {
 
         verifyValidAssignment(numStandbyReplicas, harness);
 
-        // min-cost rack aware assignor doesn't balance subtopolgy
+        // min-cost rack aware assignor doesn't balance subtopology
         if (!rackAwareStrategy.equals(StreamsConfig.RACK_AWARE_ASSIGNMENT_STRATEGY_MIN_TRAFFIC)) {
             verifyBalancedAssignment(harness, skewThreshold);
         }
@@ -521,7 +520,7 @@ public class TaskAssignorConvergenceTest {
             testForConvergence(harness, configs, 1);
             verifyValidAssignment(numStandbyReplicas, harness);
 
-            // min-cost rack aware assignor doesn't balance subtopolgy
+            // min-cost rack aware assignor doesn't balance subtopology
             if (!rackAwareStrategy.equals(StreamsConfig.RACK_AWARE_ASSIGNMENT_STRATEGY_MIN_TRAFFIC)) {
                 verifyBalancedAssignment(harness, skewThreshold);
             }
@@ -541,7 +540,7 @@ public class TaskAssignorConvergenceTest {
                 if (!harness.clientStates.isEmpty()) {
                     testForConvergence(harness, configs, 2 * (numStatefulTasks + numStatefulTasks * numStandbyReplicas));
                     verifyValidAssignment(numStandbyReplicas, harness);
-                    // min-cost rack aware assignor doesn't balance subtopolgy
+                    // min-cost rack aware assignor doesn't balance subtopology
                     if (!rackAwareStrategy.equals(StreamsConfig.RACK_AWARE_ASSIGNMENT_STRATEGY_MIN_TRAFFIC)) {
                         verifyBalancedAssignment(harness, skewThreshold);
                     }
@@ -574,13 +573,7 @@ public class TaskAssignorConvergenceTest {
         assertBalancedStatefulAssignment(allStatefulTasks, clientStates, failureContext);
         final AssignmentTestUtils.TaskSkewReport taskSkewReport = AssignmentTestUtils.analyzeTaskAssignmentBalance(harness.clientStates, skewThreshold);
         if (taskSkewReport.totalSkewedTasks() > 0) {
-            fail(
-                new StringBuilder().append("Expected a balanced task assignment, but was: ")
-                                   .append(taskSkewReport)
-                                   .append('\n')
-                                   .append(failureContext)
-                                   .toString()
-            );
+            fail("Expected a balanced task assignment, but was: " + taskSkewReport + '\n' + failureContext);
         }
     }
 
@@ -629,13 +622,7 @@ public class TaskAssignorConvergenceTest {
         }
 
         if (rebalancePending) {
-            final StringBuilder message =
-                new StringBuilder().append("Rebalances have not converged after iteration cutoff: ")
-                                   .append(iterationLimit)
-                                   .append(harness.history);
-            fail(message.toString());
+            fail("Rebalances have not converged after iteration cutoff: " + iterationLimit + harness.history);
         }
     }
-
-
 }

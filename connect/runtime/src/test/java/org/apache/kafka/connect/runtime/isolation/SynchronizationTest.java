@@ -27,6 +27,7 @@ import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.connect.runtime.WorkerConfig;
 import org.apache.kafka.connect.storage.Converter;
 
+import org.apache.maven.artifact.versioning.VersionRange;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +46,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -190,10 +192,10 @@ public class SynchronizationTest {
         }
 
         @Override
-        public PluginClassLoader pluginClassLoader(String name) {
+        PluginClassLoader pluginClassLoader(String name, VersionRange range, Optional<ClassLoader> connectorLoader) {
             dclBreakpoint.await(name);
             dclBreakpoint.await(name);
-            return super.pluginClassLoader(name);
+            return super.pluginClassLoader(name, range, connectorLoader);
         }
     }
 
@@ -224,7 +226,7 @@ public class SynchronizationTest {
     public void testSimultaneousUpwardAndDownwardDelegating() throws Exception {
         String t1Class = TestPlugins.TestPlugin.SAMPLING_CONVERTER.className();
         // Grab a reference to the target PluginClassLoader before activating breakpoints
-        ClassLoader connectorLoader = plugins.connectorLoader(t1Class);
+        ClassLoader connectorLoader = plugins.connectorLoader(t1Class, null);
 
         // THREAD 1: loads a class by delegating downward starting from the DelegatingClassLoader
         // DelegatingClassLoader breakpoint will only trigger on this thread
@@ -304,7 +306,7 @@ public class SynchronizationTest {
     public void testPluginClassLoaderDoesntHoldMonitorLock()
         throws InterruptedException, TimeoutException, BrokenBarrierException {
         String t1Class = TestPlugins.TestPlugin.SAMPLING_CONVERTER.className();
-        ClassLoader connectorLoader = plugins.connectorLoader(t1Class);
+        ClassLoader connectorLoader = plugins.connectorLoader(t1Class, null);
 
         Object externalTestLock = new Object();
         Breakpoint<Object> testBreakpoint = new Breakpoint<>();
@@ -461,9 +463,7 @@ public class SynchronizationTest {
         return r -> {
             // This is essentially Executors.defaultThreadFactory except with
             // custom thread names so in order to filter by thread names when debugging
-            SecurityManager s = System.getSecurityManager();
-            Thread t = new Thread((s != null) ? s.getThreadGroup() :
-                Thread.currentThread().getThreadGroup(), r,
+            Thread t = new Thread(Thread.currentThread().getThreadGroup(), r,
                 threadPrefix + threadNumber.getAndIncrement(),
                 0);
             if (t.isDaemon()) {

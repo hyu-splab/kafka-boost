@@ -23,30 +23,49 @@ import org.apache.kafka.common.errors.NotLeaderOrFollowerException
 import org.apache.kafka.common.record.{ControlRecordType, FileRecords, MemoryRecords}
 import org.apache.kafka.common.requests.TransactionResult
 import org.apache.kafka.common.utils.Time
-import org.apache.kafka.coordinator.group.runtime.CoordinatorLoader.{LoadSummary, UnknownRecordTypeException}
-import org.apache.kafka.coordinator.group.runtime.{CoordinatorLoader, CoordinatorPlayback, Deserializer}
+import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader.LoadSummary
+import org.apache.kafka.coordinator.common.runtime.Deserializer.UnknownRecordTypeException
+import org.apache.kafka.coordinator.common.runtime.{CoordinatorLoader, CoordinatorPlayback, Deserializer}
+import org.apache.kafka.server.storage.log.FetchIsolation
 import org.apache.kafka.server.util.KafkaScheduler
-import org.apache.kafka.storage.internals.log.FetchIsolation
 
 import java.nio.ByteBuffer
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.jdk.CollectionConverters._
 
+object CoordinatorLoaderImpl {
+  /**
+   * The interval between updating the last committed offset during loading, in offsets. Smaller
+   * values commit more often at the expense of loading times when the workload is simple and does
+   * not create collections that need to participate in {@link CoordinatorPlayback} snapshotting.
+   * Larger values commit less often and allow more temporary data to accumulate before the next
+   * commit when the workload creates many temporary collections that need to be snapshotted.
+   *
+   * The value of 16,384 was chosen as a trade-off between the performance of these two workloads.
+   *
+   * When changing this value, please run the GroupCoordinatorShardLoadingBenchmark to evaluate
+   * the relative change in performance.
+   */
+  val DEFAULT_COMMIT_INTERVAL_OFFSETS = 16384L
+}
+
 /**
  * Coordinator loader which reads records from a partition and replays them
  * to a group coordinator.
  *
- * @param replicaManager  The replica manager.
- * @param deserializer    The deserializer to use.
- * @param loadBufferSize  The load buffer size.
+ * @param replicaManager        The replica manager.
+ * @param deserializer          The deserializer to use.
+ * @param loadBufferSize        The load buffer size.
+ * @param commitIntervalOffsets The interval between updating the last committed offset during loading, in offsets.
  * @tparam T The record type.
  */
 class CoordinatorLoaderImpl[T](
   time: Time,
   replicaManager: ReplicaManager,
   deserializer: Deserializer[T],
-  loadBufferSize: Int
+  loadBufferSize: Int,
+  commitIntervalOffsets: Long = CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
 ) extends CoordinatorLoader[T] with Logging {
   private val isRunning = new AtomicBoolean(true)
   private val scheduler = new KafkaScheduler(1)
@@ -98,16 +117,11 @@ class CoordinatorLoaderImpl[T](
           // the log end offset but the log is empty. This could happen with compacted topics.
           var readAtLeastOneRecord = true
 
-          var previousHighWatermark = -1L
+          var lastCommittedOffset = -1L
           var numRecords = 0L
           var numBytes = 0L
           while (currentOffset < logEndOffset && readAtLeastOneRecord && isRunning.get) {
-            val fetchDataInfo = log.read(
-              startOffset = currentOffset,
-              maxLength = loadBufferSize,
-              isolation = FetchIsolation.LOG_END,
-              minOneMessage = true
-            )
+            val fetchDataInfo = log.read(currentOffset, loadBufferSize, FetchIsolation.LOG_END, true)
 
             readAtLeastOneRecord = fetchDataInfo.records.sizeInBytes > 0
 
@@ -140,12 +154,20 @@ class CoordinatorLoaderImpl[T](
                 batch.asScala.foreach { record =>
                   val controlRecord = ControlRecordType.parse(record.key)
                   if (controlRecord == ControlRecordType.COMMIT) {
+                    if (isTraceEnabled) {
+                      trace(s"Replaying end transaction marker from $tp at offset ${record.offset} to commit transaction " +
+                        s"with producer id ${batch.producerId} and producer epoch ${batch.producerEpoch}.")
+                    }
                     coordinator.replayEndTransactionMarker(
                       batch.producerId,
                       batch.producerEpoch,
                       TransactionResult.COMMIT
                     )
                   } else if (controlRecord == ControlRecordType.ABORT) {
+                    if (isTraceEnabled) {
+                      trace(s"Replaying end transaction marker from $tp at offset ${record.offset} to abort transaction " +
+                        s"with producer id ${batch.producerId} and producer epoch ${batch.producerEpoch}.")
+                    }
                     coordinator.replayEndTransactionMarker(
                       batch.producerId,
                       batch.producerEpoch,
@@ -156,17 +178,42 @@ class CoordinatorLoaderImpl[T](
               } else {
                 batch.asScala.foreach { record =>
                   numRecords = numRecords + 1
-                  try {
-                    coordinator.replay(
-                      record.offset(),
-                      batch.producerId,
-                      batch.producerEpoch,
-                      deserializer.deserialize(record.key, record.value)
-                    )
-                  } catch {
-                    case ex: UnknownRecordTypeException =>
-                      warn(s"Unknown record type ${ex.unknownType} while loading offsets and group metadata " +
-                        s"from $tp. Ignoring it. It could be a left over from an aborted upgrade.")
+
+                  val coordinatorRecordOpt = {
+                    try {
+                      Some(deserializer.deserialize(record.key, record.value))
+                    } catch {
+                      case ex: UnknownRecordTypeException =>
+                        warn(s"Unknown record type ${ex.unknownType} while loading offsets and group metadata " +
+                          s"from $tp. Ignoring it. It could be a left over from an aborted upgrade.")
+                        None
+                      case ex: RuntimeException =>
+                        val msg = s"Deserializing record $record from $tp failed due to: ${ex.getMessage}"
+                        error(s"$msg.")
+                        throw new RuntimeException(msg, ex)
+                    }
+                  }
+
+                  coordinatorRecordOpt.foreach { coordinatorRecord =>
+                    try {
+                      if (isTraceEnabled) {
+                        trace(s"Replaying record $coordinatorRecord from $tp at offset ${record.offset()} " +
+                          s"with producer id ${batch.producerId} and producer epoch ${batch.producerEpoch}.")
+                      }
+                      coordinator.replay(
+                        record.offset(),
+                        batch.producerId,
+                        batch.producerEpoch,
+                        coordinatorRecord
+                      )
+                    } catch {
+                      case ex: RuntimeException =>
+                        val msg = s"Replaying record $coordinatorRecord from $tp at offset ${record.offset()} " +
+                          s"with producer id ${batch.producerId} and producer epoch ${batch.producerEpoch} " +
+                          s"failed due to: ${ex.getMessage}"
+                        error(s"$msg.")
+                        throw new RuntimeException(msg, ex)
+                    }
                   }
                 }
               }
@@ -179,10 +226,14 @@ class CoordinatorLoaderImpl[T](
               if (currentOffset >= currentHighWatermark) {
                 coordinator.updateLastWrittenOffset(currentOffset)
 
-                if (currentHighWatermark > previousHighWatermark) {
+                if (currentHighWatermark > lastCommittedOffset) {
                   coordinator.updateLastCommittedOffset(currentHighWatermark)
-                  previousHighWatermark = currentHighWatermark
+                  lastCommittedOffset = currentHighWatermark
                 }
+              } else if (currentOffset - lastCommittedOffset >= commitIntervalOffsets) {
+                coordinator.updateLastWrittenOffset(currentOffset)
+                coordinator.updateLastCommittedOffset(currentOffset)
+                lastCommittedOffset = currentOffset
               }
             }
             numBytes = numBytes + memoryRecords.sizeInBytes()

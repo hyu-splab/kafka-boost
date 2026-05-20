@@ -52,14 +52,14 @@ public final class InvalidMemoryRecordsProvider implements ArgumentsProvider {
     }
 
     private static ByteBuffer notEnoughBytes() {
-        ByteBuffer buffer = ByteBuffer.allocate(Records.LOG_OVERHEAD - 1);
+        var buffer = ByteBuffer.allocate(Records.LOG_OVERHEAD - 1);
         buffer.limit(buffer.capacity());
 
         return buffer;
     }
 
     private static ByteBuffer recordsSizeTooSmall() {
-        ByteBuffer buffer = ByteBuffer.allocate(256);
+        var buffer = ByteBuffer.allocate(256);
         // Write the base offset
         buffer.putLong(BASE_OFFSET);
         // Write record size
@@ -71,7 +71,7 @@ public final class InvalidMemoryRecordsProvider implements ArgumentsProvider {
     }
 
     private static ByteBuffer notEnoughBytesToMagic() {
-        ByteBuffer buffer = ByteBuffer.allocate(256);
+        var buffer = ByteBuffer.allocate(256);
         // Write the base offset
         buffer.putLong(BASE_OFFSET);
         // Write record size
@@ -83,7 +83,7 @@ public final class InvalidMemoryRecordsProvider implements ArgumentsProvider {
     }
 
     private static ByteBuffer negativeMagic() {
-        ByteBuffer buffer = ByteBuffer.allocate(256);
+        var buffer = ByteBuffer.allocate(256);
         // Write the base offset
         buffer.putLong(BASE_OFFSET);
         // Write record size
@@ -99,7 +99,7 @@ public final class InvalidMemoryRecordsProvider implements ArgumentsProvider {
     }
 
     private static ByteBuffer largeMagic() {
-        ByteBuffer buffer = ByteBuffer.allocate(256);
+        var buffer = ByteBuffer.allocate(256);
         // Write the base offset
         buffer.putLong(BASE_OFFSET);
         // Write record size
@@ -115,7 +115,7 @@ public final class InvalidMemoryRecordsProvider implements ArgumentsProvider {
     }
 
     private static ByteBuffer lessBytesThanRecordSize() {
-        ByteBuffer buffer = ByteBuffer.allocate(256);
+        var buffer = ByteBuffer.allocate(256);
         // Write the base offset
         buffer.putLong(BASE_OFFSET);
         // Write record size

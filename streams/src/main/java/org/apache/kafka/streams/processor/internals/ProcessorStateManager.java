@@ -29,7 +29,6 @@ import org.apache.kafka.streams.processor.CommitCallback;
 import org.apache.kafka.streams.processor.StateRestoreCallback;
 import org.apache.kafka.streams.processor.StateRestoreListener;
 import org.apache.kafka.streams.processor.StateStore;
-import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.internals.Task.TaskType;
 import org.apache.kafka.streams.state.internals.CachedStateStore;
@@ -62,12 +61,12 @@ import static org.apache.kafka.streams.state.internals.OffsetCheckpoint.OFFSET_U
  * ProcessorStateManager is the source of truth for the current offset for each state store,
  * which is either the read offset during restoring, or the written offset during normal processing.
  *
- * The offset is initialized as null when the state store is registered, and then it can be updated by
+ * <p>The offset is initialized as null when the state store is registered, and then it can be updated by
  * loading checkpoint file, restore state stores, or passing from the record collector's written offsets.
  *
- * When checkpointing, if the offset is not null it would be written to the file.
+ * <p>When checkpointing, if the offset is not null it would be written to the file.
  *
- * The manager is also responsible for restoring state stores via their registered restore callback,
+ * <p>The manager is also responsible for restoring state stores via their registered restore callback,
  * which is used for both updating standby tasks as well as restoring active tasks.
  */
 public class ProcessorStateManager implements StateManager {
@@ -167,11 +166,11 @@ public class ProcessorStateManager implements StateManager {
 
     private static final String STATE_CHANGELOG_TOPIC_SUFFIX = "-changelog";
 
-    private final String logPrefix;
+    private String logPrefix;
 
     private final TaskId taskId;
     private final boolean eosEnabled;
-    private final ChangelogRegister changelogReader;
+    private ChangelogRegister changelogReader;
     private final Collection<TopicPartition> sourcePartitions;
     private final Map<String, String> storeToChangelogTopic;
 
@@ -223,7 +222,7 @@ public class ProcessorStateManager implements StateManager {
         log.debug("Created state store manager for task {}", taskId);
     }
 
-    void registerStateStores(final List<StateStore> allStores, final InternalProcessorContext processorContext) {
+    void registerStateStores(final List<StateStore> allStores, final InternalProcessorContext<?, ?> processorContext) {
         processorContext.uninitialize();
         for (final StateStore store : allStores) {
             if (stores.containsKey(store.name())) {
@@ -231,7 +230,7 @@ public class ProcessorStateManager implements StateManager {
                     maybeRegisterStoreWithChangelogReader(store.name());
                 }
             } else {
-                store.init((StateStoreContext) processorContext, store);
+                store.init(processorContext, store);
             }
             log.trace("Registered state store {}", store.name());
         }
@@ -245,7 +244,7 @@ public class ProcessorStateManager implements StateManager {
     }
 
     @Override
-    public StateStore getGlobalStore(final String name) {
+    public StateStore globalStore(final String name) {
         return globalStores.get(name);
     }
 
@@ -380,7 +379,7 @@ public class ProcessorStateManager implements StateManager {
     }
 
     @Override
-    public StateStore getStore(final String name) {
+    public StateStore store(final String name) {
         if (stores.containsKey(name)) {
             return stores.get(name).stateStore;
         } else {
@@ -542,7 +541,7 @@ public class ProcessorStateManager implements StateManager {
                     if (store instanceof TimeOrderedKeyValueBuffer) {
                         store.flush();
                     } else if (store instanceof CachedStateStore) {
-                        ((CachedStateStore) store).flushCache();
+                        ((CachedStateStore<?, ?>) store).flushCache();
                     }
                     log.trace("Flushed cache or buffer {}", store.name());
                 } catch (final RuntimeException exception) {
@@ -646,7 +645,7 @@ public class ProcessorStateManager implements StateManager {
                 final StateStore store = metadata.stateStore;
 
                 if (store instanceof CachedStateStore) {
-                    ((CachedStateStore) store).clearCache();
+                    ((CachedStateStore<?, ?>) store).clearCache();
                 }
                 log.trace("Cleared cache {}", store.name());
             }

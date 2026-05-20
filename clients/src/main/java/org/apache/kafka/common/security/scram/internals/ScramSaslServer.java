@@ -28,7 +28,6 @@ import org.apache.kafka.common.security.scram.internals.ScramMessages.ClientFirs
 import org.apache.kafka.common.security.scram.internals.ScramMessages.ServerFinalMessage;
 import org.apache.kafka.common.security.scram.internals.ScramMessages.ServerFirstMessage;
 import org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCredentialCallback;
-import org.apache.kafka.common.utils.Utils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,7 +35,6 @@ import org.slf4j.LoggerFactory;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
@@ -58,7 +56,7 @@ import javax.security.sasl.SaslServerFactory;
 public class ScramSaslServer implements SaslServer {
 
     private static final Logger log = LoggerFactory.getLogger(ScramSaslServer.class);
-    private static final Set<String> SUPPORTED_EXTENSIONS = Utils.mkSet(ScramLoginModule.TOKEN_AUTH_CONFIG);
+    private static final Set<String> SUPPORTED_EXTENSIONS = Set.of(ScramLoginModule.TOKEN_AUTH_CONFIG);
 
     enum State {
         RECEIVE_CLIENT_FIRST_MESSAGE,
@@ -149,7 +147,7 @@ public class ScramSaslServer implements SaslServer {
                 case RECEIVE_CLIENT_FINAL_MESSAGE:
                     try {
                         ClientFinalMessage clientFinalMessage = new ClientFinalMessage(response);
-                        if (!clientFinalMessage.nonce().endsWith(serverFirstMessage.nonce())) {
+                        if (!clientFinalMessage.nonce().equals(serverFirstMessage.nonce())) {
                             throw new SaslException("Invalid client nonce in the final client message.");
                         }
                         verifyClientProof(clientFinalMessage);
@@ -206,14 +204,14 @@ public class ScramSaslServer implements SaslServer {
     public byte[] unwrap(byte[] incoming, int offset, int len) {
         if (!isComplete())
             throw new IllegalStateException("Authentication exchange has not completed");
-        return Arrays.copyOfRange(incoming, offset, offset + len);
+        throw new IllegalStateException("SCRAM supports neither integrity nor privacy");
     }
 
     @Override
     public byte[] wrap(byte[] outgoing, int offset, int len) {
         if (!isComplete())
             throw new IllegalStateException("Authentication exchange has not completed");
-        return Arrays.copyOfRange(outgoing, offset, offset + len);
+        throw new IllegalStateException("SCRAM supports neither integrity nor privacy");
     }
 
     @Override

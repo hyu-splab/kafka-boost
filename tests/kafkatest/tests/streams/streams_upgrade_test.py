@@ -15,38 +15,31 @@
 
 import random
 import time
-from ducktape.mark import matrix
+from ducktape.mark import matrix, ignore
 from ducktape.mark.resource import cluster
 from ducktape.tests.test import Test
-from ducktape.utils.util import wait_until
-from kafkatest.services.kafka import KafkaService
+from kafkatest.services.kafka import KafkaService, quorum
 from kafkatest.services.streams import StreamsSmokeTestDriverService, StreamsSmokeTestJobRunnerService, \
     StreamsUpgradeTestJobRunnerService
-from kafkatest.services.zookeeper import ZookeeperService
 from kafkatest.tests.streams.utils import extract_generation_from_logs, extract_generation_id
-from kafkatest.version import LATEST_0_10_0, LATEST_0_10_1, LATEST_0_10_2, LATEST_0_11_0, LATEST_1_0, LATEST_1_1, \
-    LATEST_2_0, LATEST_2_1, LATEST_2_2, LATEST_2_3, LATEST_2_4, LATEST_2_5, LATEST_2_6, LATEST_2_7, LATEST_2_8, \
-    LATEST_3_0, LATEST_3_1, LATEST_3_2, LATEST_3_3, LATEST_3_4, LATEST_3_5, LATEST_3_6, LATEST_3_7, LATEST_3_8, DEV_BRANCH, DEV_VERSION, \
-    KafkaVersion
+from kafkatest.version import LATEST_2_1, LATEST_2_2, LATEST_2_3, LATEST_2_4, LATEST_2_5, LATEST_2_6, LATEST_2_7, LATEST_2_8, \
+    LATEST_3_0, LATEST_3_1, LATEST_3_2, LATEST_3_3, LATEST_3_4, LATEST_3_5, LATEST_3_6, LATEST_3_7, LATEST_3_8, LATEST_3_9, \
+    LATEST_4_0, DEV_BRANCH, DEV_VERSION, KafkaVersion
 
 # broker 0.10.0 is not compatible with newer Kafka Streams versions
 # broker 0.10.1 and 0.10.2 do not support headers, as required by suppress() (since v2.2.1)
-broker_upgrade_versions = [str(LATEST_0_11_0), str(LATEST_1_0), str(LATEST_1_1),
-                           str(LATEST_2_0), str(LATEST_2_1), str(LATEST_2_2), str(LATEST_2_3),
-                           str(LATEST_2_4), str(LATEST_2_5), str(LATEST_2_6), str(LATEST_2_7),
-                           str(LATEST_2_8), str(LATEST_3_0), str(LATEST_3_1), str(LATEST_3_2),
+broker_upgrade_versions = [str(LATEST_2_8), str(LATEST_3_0), str(LATEST_3_1), str(LATEST_3_2),
                            str(LATEST_3_3), str(LATEST_3_4), str(LATEST_3_5), str(LATEST_3_6),
-                           str(LATEST_3_7), str(LATEST_3_8), str(DEV_BRANCH)]
+                           str(LATEST_3_7), str(LATEST_3_8), str(LATEST_3_9), str(LATEST_4_0),
+                           str(DEV_BRANCH)]
 
-metadata_1_versions = [str(LATEST_0_10_0)]
-metadata_2_versions = [str(LATEST_0_10_1), str(LATEST_0_10_2), str(LATEST_0_11_0), str(LATEST_1_0), str(LATEST_1_1),
-                       str(LATEST_2_4), str(LATEST_2_5), str(LATEST_2_6), str(LATEST_2_7), str(LATEST_2_8),
+metadata_2_versions = [str(LATEST_2_4), str(LATEST_2_5), str(LATEST_2_6), str(LATEST_2_7), str(LATEST_2_8),
                        str(LATEST_3_0), str(LATEST_3_1), str(LATEST_3_2), str(LATEST_3_3)]
 # upgrading from version (2.4...3.3) is broken and only fixed later in 3.3.3 (unreleased) and 3.4.0
 # -> https://issues.apache.org/jira/browse/KAFKA-14646
 # thus, we cannot test two bounce rolling upgrade because we know it's broken
 # instead we add version 2.4...3.3 to the `metadata_2_versions` upgrade list
-fk_join_versions = [str(LATEST_3_4), str(LATEST_3_5), str(LATEST_3_6), str(LATEST_3_7), str(LATEST_3_8)]
+fk_join_versions = [str(LATEST_3_4), str(LATEST_3_5), str(LATEST_3_6), str(LATEST_3_7), str(LATEST_3_8), str(LATEST_3_9), str(LATEST_4_0)]
 
 
 """
@@ -112,10 +105,9 @@ class StreamsUpgradeTest(Test):
             self.kafka.start_node(node)
 
     @cluster(num_nodes=6)
-    @matrix(from_version=metadata_1_versions)
-    @matrix(from_version=metadata_2_versions)
-    @matrix(from_version=fk_join_versions)
-    def test_rolling_upgrade_with_2_bounces(self, from_version):
+    @matrix(from_version=metadata_2_versions, metadata_quorum=[quorum.combined_kraft])
+    @matrix(from_version=fk_join_versions, metadata_quorum=[quorum.combined_kraft])
+    def test_rolling_upgrade_with_2_bounces(self, from_version, metadata_quorum):
         """
         This test verifies that the cluster successfully upgrades despite changes in the metadata and FK
         join protocols.
@@ -154,7 +146,8 @@ class StreamsUpgradeTest(Test):
         self.stop_and_await()
 
     @cluster(num_nodes=6)
-    def test_version_probing_upgrade(self):
+    @matrix(metadata_quorum=[quorum.combined_kraft])
+    def test_version_probing_upgrade(self, metadata_quorum):
         """
         Starts 3 KafkaStreams instances, and upgrades one-by-one to "future version"
         """
@@ -181,8 +174,8 @@ class StreamsUpgradeTest(Test):
         self.stop_and_await()
 
     @cluster(num_nodes=6)
-    @matrix(from_version=[str(LATEST_3_2), str(DEV_VERSION)],  upgrade=[True, False])
-    def test_upgrade_downgrade_state_updater(self, from_version, upgrade):
+    @matrix(from_version=[str(LATEST_3_2), str(DEV_VERSION)],  upgrade=[True, False], metadata_quorum=[quorum.combined_kraft])
+    def test_upgrade_downgrade_state_updater(self, from_version, upgrade, metadata_quorum):
         """
         Starts 3 KafkaStreams instances, and enables / disables state restoration
         for the instances in a rolling bounce.
@@ -221,10 +214,7 @@ class StreamsUpgradeTest(Test):
         self.stop_and_await()
 
     def set_up_services(self):
-        self.zk = ZookeeperService(self.test_context, num_nodes=1)
-        self.zk.start()
-
-        self.kafka = KafkaService(self.test_context, num_nodes=1, zk=self.zk, topics=self.topics)
+        self.kafka = KafkaService(self.test_context, num_nodes=1, zk=None, topics=self.topics)
         self.kafka.start()
 
         self.driver = StreamsSmokeTestDriverService(self.test_context, self.kafka)

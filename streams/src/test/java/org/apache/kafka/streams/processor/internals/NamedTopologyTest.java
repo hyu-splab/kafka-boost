@@ -33,6 +33,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.regex.Pattern;
@@ -43,6 +44,7 @@ import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+@SuppressWarnings("deprecation")
 public class NamedTopologyTest {
     private static final String UNKNOWN_TOPOLOGY = "not-a-real-topology";
     private static final String UNKNOWN_STORE = "not-a-real-store";
@@ -63,7 +65,7 @@ public class NamedTopologyTest {
 
     @AfterEach
     public void cleanup() {
-        streams.close();
+        streams.close(Duration.ofSeconds(60));
     }
 
     private static Properties configProps() {
@@ -105,9 +107,9 @@ public class NamedTopologyTest {
         final NamedTopology topology2 = builder2.build();
         final NamedTopology topology3 = builder3.build();
         streams.start(asList(topology1, topology2, topology3));
-        assertThat(streams.getTopologyByName("topology-1").get(), equalTo(topology1));
-        assertThat(streams.getTopologyByName("topology-2").get(), equalTo(topology2));
-        assertThat(streams.getTopologyByName("topology-3").get(), equalTo(topology3));
+        assertThat(streams.getTopologyByName("topology-1").orElseThrow(), equalTo(topology1));
+        assertThat(streams.getTopologyByName("topology-2").orElseThrow(), equalTo(topology2));
+        assertThat(streams.getTopologyByName("topology-3").orElseThrow(), equalTo(topology3));
     }
 
     @Test

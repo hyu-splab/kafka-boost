@@ -17,47 +17,39 @@
 package org.apache.kafka.coordinator.group.modern;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.coordinator.group.MetadataImageBuilder;
+import org.apache.kafka.image.MetadataImage;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Set;
 
-import static org.apache.kafka.coordinator.group.CoordinatorRecordHelpersTest.mkMapOfPartitionRacks;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class SubscribedTopicMetadataTest {
 
-    private Map<Uuid, TopicMetadata> topicMetadataMap;
     private SubscribedTopicDescriberImpl subscribedTopicMetadata;
+    private MetadataImage metadataImage;
+    private final int numPartitions = 5;
 
     @BeforeEach
     public void setUp() {
-        topicMetadataMap = new HashMap<>();
+        MetadataImageBuilder metadataImageBuilder = new MetadataImageBuilder();
         for (int i = 0; i < 5; i++) {
             Uuid topicId = Uuid.randomUuid();
             String topicName = "topic" + i;
-            Map<Integer, Set<String>> partitionRacks = mkMapOfPartitionRacks(5);
-            topicMetadataMap.put(
-                topicId,
-                new TopicMetadata(topicId, topicName, 5, partitionRacks)
-            );
+            metadataImageBuilder.addTopic(topicId, topicName, numPartitions);
         }
-        subscribedTopicMetadata = new SubscribedTopicDescriberImpl(topicMetadataMap);
+        metadataImage = metadataImageBuilder.addRacks().build();
+
+        subscribedTopicMetadata = new SubscribedTopicDescriberImpl(metadataImage);
     }
 
     @Test
-    public void testAttribute() {
-        assertEquals(topicMetadataMap, subscribedTopicMetadata.topicMetadata());
-    }
-
-    @Test
-    public void testTopicMetadataCannotBeNull() {
+    public void testMetadataImageCannotBeNull() {
         assertThrows(NullPointerException.class, () -> new SubscribedTopicDescriberImpl(null));
     }
 
@@ -65,47 +57,40 @@ public class SubscribedTopicMetadataTest {
     public void testNumberOfPartitions() {
         Uuid topicId = Uuid.randomUuid();
 
-        // Test -1 is returned when the topic Id doesn't exist.
+        // Test -1 is returned when the topic ID doesn't exist.
         assertEquals(-1, subscribedTopicMetadata.numPartitions(topicId));
 
-        topicMetadataMap.put(topicId, new TopicMetadata(topicId, "topic6", 3, Collections.emptyMap()));
-
-        // Test that the correct number of partitions are returned for a given topic Id.
-        assertEquals(3, subscribedTopicMetadata.numPartitions(topicId));
+        // Test that the correct number of partitions are returned for a given topic ID.
+        metadataImage.topics().topicsById().forEach((id, name) ->
+            // Test that the correct number of partitions are returned for a given topic ID.
+            assertEquals(numPartitions, subscribedTopicMetadata.numPartitions(id))
+        );
     }
 
     @Test
     public void testRacksForPartition() {
         Uuid topicId = Uuid.randomUuid();
 
-        // Test that an empty set is returned for a non-existent topic Id.
-        assertEquals(Collections.emptySet(), subscribedTopicMetadata.racksForPartition(topicId, 0));
+        // Test empty set is returned when the topic ID doesn't exist.
+        assertEquals(Set.of(), subscribedTopicMetadata.racksForPartition(topicId, 0));
+        metadataImage.topics().topicsById().forEach((id, name) -> {
+            // Test empty set is returned when the partition ID doesn't exist.
+            assertEquals(Set.of(), subscribedTopicMetadata.racksForPartition(id, 10));
 
-        // Add topic Id with partition racks included.
-        Map<Integer, Set<String>> partitionRacks = mkMapOfPartitionRacks(3);
-        topicMetadataMap.put(topicId, new TopicMetadata(topicId, "topic6", 3, partitionRacks));
-
-        // Test that an empty set is returned for a non-existent partition Id.
-        assertEquals(Collections.emptySet(), subscribedTopicMetadata.racksForPartition(topicId, 4));
-
-        // Test that a correct set of racks is returned for the given topic Id and partition Id.
-        assertEquals(partitionRacks.get(2), subscribedTopicMetadata.racksForPartition(topicId, 2));
-
-        // Add another topic Id without partition racks.
-        topicId = Uuid.randomUuid();
-        topicMetadataMap.put(topicId, new TopicMetadata(topicId, "topic6", 3, Collections.emptyMap()));
-
-        // Test that an empty set is returned when the partition rack info is absent.
-        assertEquals(Collections.emptySet(), subscribedTopicMetadata.racksForPartition(topicId, 1));
+            // Test that the correct racks of partition are returned for a given topic ID.
+            assertEquals(Set.of("rack0", "rack1"), subscribedTopicMetadata.racksForPartition(id, 0));
+        });
     }
 
     @Test
     public void testEquals() {
-        assertEquals(new SubscribedTopicDescriberImpl(topicMetadataMap), subscribedTopicMetadata);
+        assertEquals(new SubscribedTopicDescriberImpl(metadataImage), subscribedTopicMetadata);
 
-        Map<Uuid, TopicMetadata> topicMetadataMap2 = new HashMap<>();
         Uuid topicId = Uuid.randomUuid();
-        topicMetadataMap2.put(topicId, new TopicMetadata(topicId, "newTopic", 5, Collections.emptyMap()));
-        assertNotEquals(new SubscribedTopicDescriberImpl(topicMetadataMap2), subscribedTopicMetadata);
+        MetadataImage metadataImage2 = new MetadataImageBuilder()
+            .addTopic(topicId, "newTopic", 5)
+            .addRacks()
+            .build();
+        assertNotEquals(new SubscribedTopicDescriberImpl(metadataImage2), subscribedTopicMetadata);
     }
 }

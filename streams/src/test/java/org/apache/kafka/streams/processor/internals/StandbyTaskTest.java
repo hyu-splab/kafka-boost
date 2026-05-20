@@ -113,7 +113,7 @@ public class StandbyTaskTest {
 
     private final MockTime time = new MockTime();
     private final Metrics metrics = new Metrics(new MetricConfig().recordLevel(Sensor.RecordingLevel.DEBUG), time);
-    private final StreamsMetricsImpl streamsMetrics = new StreamsMetricsImpl(metrics, threadName, StreamsConfig.METRICS_LATEST, time);
+    private final StreamsMetricsImpl streamsMetrics = new StreamsMetricsImpl(metrics, threadName, "processId", time);
 
     private File baseDir;
     private StreamsConfig config;
@@ -178,7 +178,7 @@ public class StandbyTaskTest {
     }
 
     @Test
-    public void shouldThrowLockExceptionIfFailedToLockStateDirectory() throws IOException {
+    public void shouldThrowLockExceptionIfFailedToLockStateDirectory() {
         stateDirectory = mock(StateDirectory.class);
         when(stateDirectory.lock(taskId)).thenReturn(false);
         when(stateManager.taskType()).thenReturn(TaskType.STANDBY);
@@ -213,7 +213,7 @@ public class StandbyTaskTest {
         task.suspend();
         task.closeClean();
 
-        assertThrows(IllegalStateException.class, task::prepareCommit);
+        assertThrows(IllegalStateException.class, () -> task.prepareCommit(true));
     }
 
     @Test
@@ -261,13 +261,13 @@ public class StandbyTaskTest {
 
         task = createStandbyTask();
         task.initializeIfNeeded();
-        task.prepareCommit();
+        task.prepareCommit(true);
         task.postCommit(false);  // this should not checkpoint
 
-        task.prepareCommit();
+        task.prepareCommit(true);
         task.postCommit(false);  // this should checkpoint
 
-        task.prepareCommit();
+        task.prepareCommit(true);
         task.postCommit(false);  // this should not checkpoint
 
         verify(stateManager).checkpoint();
@@ -322,7 +322,7 @@ public class StandbyTaskTest {
         task = createStandbyTask();
         task.initializeIfNeeded();
         task.suspend();
-        task.prepareCommit();
+        task.prepareCommit(true);
         task.postCommit(true);
         task.closeClean();
 
@@ -360,7 +360,7 @@ public class StandbyTaskTest {
         // could commit if the offset advanced beyond threshold
         assertTrue(task.commitNeeded());
 
-        task.prepareCommit();
+        task.prepareCommit(true);
         task.postCommit(true);
     }
 
@@ -389,7 +389,7 @@ public class StandbyTaskTest {
         task = createStandbyTask();
         task.initializeIfNeeded();
 
-        task.prepareCommit();
+        task.prepareCommit(true);
         assertThrows(RuntimeException.class, () -> task.postCommit(true));
 
         assertEquals(RUNNING, task.state());
@@ -428,32 +428,6 @@ public class StandbyTaskTest {
         doNothing().when(stateManager).close();
 
         final MetricName metricName = setupCloseTaskMetric();
-
-        task = createStandbyTask();
-        task.suspend();
-
-        task.closeDirty();
-
-        final double expectedCloseTaskMetric = 1.0;
-        verifyCloseTaskMetric(expectedCloseTaskMetric, streamsMetrics, metricName);
-
-        assertEquals(Task.State.CLOSED, task.state());
-    }
-
-    @SuppressWarnings("deprecation")
-    @Test
-    public void shouldDeleteStateDirOnTaskCreatedAndEosAlphaUncleanClose() {
-        doNothing().when(stateManager).close();
-
-        when(stateManager.baseDir()).thenReturn(baseDir);
-
-        final MetricName metricName = setupCloseTaskMetric();
-
-        config = new StreamsConfig(mkProperties(mkMap(
-            mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, applicationId),
-            mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:2171"),
-            mkEntry(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE)
-        )));
 
         task = createStandbyTask();
         task.suspend();
@@ -596,7 +570,7 @@ public class StandbyTaskTest {
             streamsMetrics
         );
 
-        final InternalProcessorContext context = new ProcessorContextImpl(
+        final InternalProcessorContext<?, ?> context = new ProcessorContextImpl(
             taskId,
             config,
             stateManager,

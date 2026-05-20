@@ -56,8 +56,6 @@ import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -167,7 +165,7 @@ public class AclControlManagerTest {
     }
 
     static class MockClusterMetadataAuthorizer implements ClusterMetadataAuthorizer {
-        Map<Uuid, StandardAcl> acls = Collections.emptyMap();
+        Map<Uuid, StandardAcl> acls = Map.of();
 
         @Override
         public void setAclMutator(AclMutator aclMutator) {
@@ -233,7 +231,7 @@ public class AclControlManagerTest {
     @Test
     public void testLoadSnapshot() {
         SnapshotRegistry snapshotRegistry = new SnapshotRegistry(new LogContext());
-        snapshotRegistry.getOrCreateSnapshot(0);
+        snapshotRegistry.idempotentCreateSnapshot(0);
         AclControlManager manager = new AclControlManager.Builder().
             setSnapshotRegistry(snapshotRegistry).
             build();
@@ -314,7 +312,7 @@ public class AclControlManagerTest {
         assertFalse(manager.idToAcl().isEmpty());
 
         ControllerResult<List<AclDeleteResult>> deleteResult =
-            manager.deleteAcls(Arrays.asList(
+            manager.deleteAcls(List.of(
                 new AclBindingFilter(
                     new ResourcePatternFilter(ResourceType.ANY, null, LITERAL),
                         AccessControlEntryFilter.ANY),
@@ -328,7 +326,7 @@ public class AclControlManagerTest {
             assertEquals(Optional.empty(), result.exception());
             deleted.add(result.aclBinding());
         }
-        assertEquals(new HashSet<>(Arrays.asList(
+        assertEquals(new HashSet<>(List.of(
             TEST_ACLS.get(0).toBinding(),
                 TEST_ACLS.get(2).toBinding())), deleted);
         assertEquals(InvalidRequestException.class,
@@ -341,29 +339,45 @@ public class AclControlManagerTest {
     }
 
     @Test
-    public void testDeleteDedupe() {
+    public void testCreateDedupe() {
         AclControlManager manager = new AclControlManager.Builder().build();
-        MockClusterMetadataAuthorizer authorizer = new MockClusterMetadataAuthorizer();
-        authorizer.loadSnapshot(manager.idToAcl());
 
         AclBinding aclBinding = new AclBinding(new ResourcePattern(TOPIC, "topic-1", LITERAL),
                 new AccessControlEntry("User:user", "10.0.0.1", AclOperation.ALL, ALLOW));
 
-        ControllerResult<List<AclCreateResult>> createResult = manager.createAcls(Collections.singletonList(aclBinding));
+        ControllerResult<List<AclCreateResult>> createResult = manager.createAcls(List.of(aclBinding, aclBinding));
+        RecordTestUtils.replayAll(manager, createResult.records());
+        assertEquals(1, createResult.records().size());
+        assertEquals(1, manager.idToAcl().size());
+
+        createResult = manager.createAcls(List.of(aclBinding));
+        assertEquals(0, createResult.records().size());
+        assertEquals(1, manager.idToAcl().size());
+    }
+
+    @Test
+    public void testDeleteDedupe() {
+        AclControlManager manager = new AclControlManager.Builder().build();
+
+        AclBinding aclBinding = new AclBinding(new ResourcePattern(TOPIC, "topic-1", LITERAL),
+                new AccessControlEntry("User:user", "10.0.0.1", AclOperation.ALL, ALLOW));
+
+        ControllerResult<List<AclCreateResult>> createResult = manager.createAcls(List.of(aclBinding));
+        RecordTestUtils.replayAll(manager, createResult.records());
         Uuid id = ((AccessControlEntryRecord) createResult.records().get(0).message()).id();
         assertEquals(1, createResult.records().size());
 
-        ControllerResult<List<AclDeleteResult>> deleteAclResultsAnyFilter = manager.deleteAcls(Collections.singletonList(AclBindingFilter.ANY));
+        ControllerResult<List<AclDeleteResult>> deleteAclResultsAnyFilter = manager.deleteAcls(List.of(AclBindingFilter.ANY));
         assertEquals(1, deleteAclResultsAnyFilter.records().size());
         assertEquals(id, ((RemoveAccessControlEntryRecord) deleteAclResultsAnyFilter.records().get(0).message()).id());
         assertEquals(1, deleteAclResultsAnyFilter.response().size());
 
-        ControllerResult<List<AclDeleteResult>> deleteAclResultsSpecificFilter = manager.deleteAcls(Collections.singletonList(aclBinding.toFilter()));
+        ControllerResult<List<AclDeleteResult>> deleteAclResultsSpecificFilter = manager.deleteAcls(List.of(aclBinding.toFilter()));
         assertEquals(1, deleteAclResultsSpecificFilter.records().size());
         assertEquals(id, ((RemoveAccessControlEntryRecord) deleteAclResultsSpecificFilter.records().get(0).message()).id());
         assertEquals(1, deleteAclResultsSpecificFilter.response().size());
 
-        ControllerResult<List<AclDeleteResult>> deleteAclResultsBothFilters = manager.deleteAcls(Arrays.asList(AclBindingFilter.ANY, aclBinding.toFilter()));
+        ControllerResult<List<AclDeleteResult>> deleteAclResultsBothFilters = manager.deleteAcls(List.of(AclBindingFilter.ANY, aclBinding.toFilter()));
         assertEquals(1, deleteAclResultsBothFilters.records().size());
         assertEquals(id, ((RemoveAccessControlEntryRecord) deleteAclResultsBothFilters.records().get(0).message()).id());
         assertEquals(2, deleteAclResultsBothFilters.response().size());
@@ -400,13 +414,13 @@ public class AclControlManagerTest {
         ControllerResult<List<AclCreateResult>> firstCreateResult = manager.createAcls(firstCreate);
         assertEquals((MAX_RECORDS_PER_USER_OP / 2) + 1, firstCreateResult.response().size());
         for (AclCreateResult result : firstCreateResult.response()) {
-            assertTrue(!result.exception().isPresent());
+            assertTrue(result.exception().isEmpty());
         }
 
         ControllerResult<List<AclCreateResult>> secondCreateResult = manager.createAcls(secondCreate);
         assertEquals((MAX_RECORDS_PER_USER_OP / 2) + 1, secondCreateResult.response().size());
         for (AclCreateResult result : secondCreateResult.response()) {
-            assertTrue(!result.exception().isPresent());
+            assertTrue(result.exception().isEmpty());
         }
 
         RecordTestUtils.replayAll(manager, firstCreateResult.records());

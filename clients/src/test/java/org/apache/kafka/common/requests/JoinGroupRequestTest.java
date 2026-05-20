@@ -24,7 +24,6 @@ import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.Test;
 
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,7 +73,7 @@ public class JoinGroupRequestTest {
         int sessionTimeoutMs = 30000;
         short version = 0;
 
-        ByteBuffer buffer = MessageUtil.toByteBuffer(new JoinGroupRequestData()
+        var buffer = MessageUtil.toByteBufferAccessor(new JoinGroupRequestData()
                 .setGroupId("groupId")
                 .setMemberId("consumerId")
                 .setProtocolType("consumer")

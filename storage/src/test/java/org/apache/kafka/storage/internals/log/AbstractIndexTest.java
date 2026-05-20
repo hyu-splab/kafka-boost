@@ -66,7 +66,7 @@ public class AbstractIndexTest {
         }
 
         @Override
-        public void forceUnmap() throws IOException {
+        protected void forceUnmap() throws IOException {
             unmapInvoked = true;
             unmappedBuffer = mmap();
         }

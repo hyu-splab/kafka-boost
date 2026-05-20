@@ -12,20 +12,17 @@
   */
 package kafka.api
 
-import org.junit.jupiter.api.{AfterEach, BeforeEach, TestInfo, Timeout}
-import kafka.utils.{JaasTestUtils, TestUtils}
+import kafka.security.JaasTestUtils
+import kafka.utils.{TestInfoUtils, TestUtils}
 import org.apache.kafka.common.security.auth.SecurityProtocol
-import org.apache.kafka.server.config.ZkConfigs
+import org.junit.jupiter.api.{AfterEach, BeforeEach, TestInfo, Timeout}
 import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.ValueSource
-
-import scala.jdk.CollectionConverters._
+import org.junit.jupiter.params.provider.MethodSource
 
 @Timeout(600)
 class SaslMultiMechanismConsumerTest extends BaseConsumerTest with SaslSetup {
   private val kafkaClientSaslMechanism = "PLAIN"
   private val kafkaServerSaslMechanisms = List("GSSAPI", "PLAIN")
-  this.serverConfig.setProperty(ZkConfigs.ZK_ENABLE_SECURE_ACLS_CONFIG, "true")
   override protected def securityProtocol = SecurityProtocol.SASL_SSL
   override protected lazy val trustStoreFile = Some(TestUtils.tempFile("truststore", ".jks"))
   override protected val serverSaslProperties = Some(kafkaServerSaslProperties(kafkaServerSaslMechanisms, kafkaClientSaslMechanism))
@@ -33,8 +30,8 @@ class SaslMultiMechanismConsumerTest extends BaseConsumerTest with SaslSetup {
 
   @BeforeEach
   override def setUp(testInfo: TestInfo): Unit = {
-    startSasl(jaasSections(kafkaServerSaslMechanisms, Some(kafkaClientSaslMechanism), Both,
-      JaasTestUtils.KafkaServerContextName))
+    startSasl(jaasSections(kafkaServerSaslMechanisms, Some(kafkaClientSaslMechanism),
+      JaasTestUtils.KAFKA_SERVER_CONTEXT_NAME))
     super.setUp(testInfo)
   }
 
@@ -44,9 +41,9 @@ class SaslMultiMechanismConsumerTest extends BaseConsumerTest with SaslSetup {
     closeSasl()
   }
 
-  @ParameterizedTest
-  @ValueSource(strings = Array("zk", "kraft"))
-  def testMultipleBrokerMechanisms(quorum: String): Unit = {
+  @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedGroupProtocolNames)
+  @MethodSource(Array("getTestGroupProtocolParametersAll"))
+  def testMultipleBrokerMechanisms(groupProtocol: String): Unit = {
     val plainSaslProducer = createProducer()
     val plainSaslConsumer = createConsumer()
 
@@ -59,7 +56,7 @@ class SaslMultiMechanismConsumerTest extends BaseConsumerTest with SaslSetup {
     // Test SASL/PLAIN producer and consumer
     var startingTimestamp = System.currentTimeMillis()
     sendRecords(plainSaslProducer, numRecords, tp, startingTimestamp = startingTimestamp)
-    plainSaslConsumer.assign(List(tp).asJava)
+    plainSaslConsumer.assign(java.util.List.of(tp))
     plainSaslConsumer.seek(tp, 0)
     consumeAndVerifyRecords(consumer = plainSaslConsumer, numRecords = numRecords, startingOffset = startingOffset,
       startingTimestamp = startingTimestamp)
@@ -69,7 +66,7 @@ class SaslMultiMechanismConsumerTest extends BaseConsumerTest with SaslSetup {
     // Test SASL/GSSAPI producer and consumer
     startingTimestamp = System.currentTimeMillis()
     sendRecords(gssapiSaslProducer, numRecords, tp, startingTimestamp = startingTimestamp)
-    gssapiSaslConsumer.assign(List(tp).asJava)
+    gssapiSaslConsumer.assign(java.util.List.of(tp))
     gssapiSaslConsumer.seek(tp, startingOffset)
     consumeAndVerifyRecords(consumer = gssapiSaslConsumer, numRecords = numRecords, startingOffset = startingOffset,
       startingTimestamp = startingTimestamp)
@@ -79,7 +76,7 @@ class SaslMultiMechanismConsumerTest extends BaseConsumerTest with SaslSetup {
     // Test SASL/PLAIN producer and SASL/GSSAPI consumer
     startingTimestamp = System.currentTimeMillis()
     sendRecords(plainSaslProducer, numRecords, tp, startingTimestamp = startingTimestamp)
-    gssapiSaslConsumer.assign(List(tp).asJava)
+    gssapiSaslConsumer.assign(java.util.List.of(tp))
     gssapiSaslConsumer.seek(tp, startingOffset)
     consumeAndVerifyRecords(consumer = gssapiSaslConsumer, numRecords = numRecords, startingOffset = startingOffset,
       startingTimestamp = startingTimestamp)
@@ -88,7 +85,7 @@ class SaslMultiMechanismConsumerTest extends BaseConsumerTest with SaslSetup {
     // Test SASL/GSSAPI producer and SASL/PLAIN consumer
     startingTimestamp = System.currentTimeMillis()
     sendRecords(gssapiSaslProducer, numRecords, tp, startingTimestamp = startingTimestamp)
-    plainSaslConsumer.assign(List(tp).asJava)
+    plainSaslConsumer.assign(java.util.List.of(tp))
     plainSaslConsumer.seek(tp, startingOffset)
     consumeAndVerifyRecords(consumer = plainSaslConsumer, numRecords = numRecords, startingOffset = startingOffset,
       startingTimestamp = startingTimestamp)

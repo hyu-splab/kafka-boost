@@ -19,7 +19,6 @@ package org.apache.kafka.clients;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.SaslConfigs;
-import org.apache.kafka.common.metrics.JmxReporter;
 import org.apache.kafka.common.metrics.MetricsReporter;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.telemetry.internals.ClientTelemetryReporter;
@@ -89,8 +88,9 @@ public class CommonClientConfigs {
         "If provided, the backoff per host will increase exponentially for each consecutive connection failure, up to this maximum. After calculating the backoff increase, 20% random jitter is added to avoid connection storms.";
 
     public static final String RETRIES_CONFIG = "retries";
-    public static final String RETRIES_DOC = "Setting a value greater than zero will cause the client to resend any request that fails with a potentially transient error." +
-        " It is recommended to set the value to either zero or `MAX_VALUE` and use corresponding timeout parameters to control how long a client should retry a request.";
+    public static final String RETRIES_DOC = "It is recommended to set the value to either <code>MAX_VALUE</code> or zero, and use corresponding timeout parameters to control how long a client should retry a request." +
+        " Setting a value greater than zero will cause the client to resend any request that fails with a potentially transient error." +
+        " Setting a value of zero will lead to transient errors not being retried, and they will be propagated to the application to be handled.";
 
     public static final String RETRY_BACKOFF_MS_CONFIG = "retry.backoff.ms";
     public static final String RETRY_BACKOFF_MS_DOC = "The amount of time to wait before attempting to retry a failed request to a given topic partition. " +
@@ -118,20 +118,22 @@ public class CommonClientConfigs {
     public static final String METRICS_NUM_SAMPLES_DOC = "The number of samples maintained to compute metrics.";
 
     public static final String METRICS_RECORDING_LEVEL_CONFIG = "metrics.recording.level";
-    public static final String METRICS_RECORDING_LEVEL_DOC = "The highest recording level for metrics.";
-
+    public static final String METRICS_RECORDING_LEVEL_DOC = "The highest recording level for metrics. It has three levels for recording metrics - info, debug, and trace.\n" +
+            " \n" +
+            "INFO level records only essential metrics necessary for monitoring system performance and health. It collects vital data without gathering too much detail, making it suitable for production environments where minimal overhead is desired.\n" +
+            "\n" +
+            "DEBUG level records most metrics, providing more detailed information about the system's operation. It's useful for development and testing environments where you need deeper insights to debug and fine-tune the application.\n" +
+            "\n" +
+            "TRACE level records all possible metrics, capturing every detail about the system's performance and operation. It's best for controlled environments where in-depth analysis is required, though it can introduce significant overhead.";
     public static final String METRIC_REPORTER_CLASSES_CONFIG = "metric.reporters";
-    public static final String METRIC_REPORTER_CLASSES_DOC = "A list of classes to use as metrics reporters. Implementing the <code>org.apache.kafka.common.metrics.MetricsReporter</code> interface allows plugging in classes that will be notified of new metric creation. The JmxReporter is always included to register JMX statistics.";
+    public static final String METRIC_REPORTER_CLASSES_DOC = "A list of classes to use as metrics reporters. " +
+            "Implementing the <code>org.apache.kafka.common.metrics.MetricsReporter</code> interface allows plugging in classes that will be notified of new metric creation. " +
+            "When custom reporters are set and <code>org.apache.kafka.common.metrics.JmxReporter</code> is needed, it has to be explicitly added to the list.";
 
     public static final String METRICS_CONTEXT_PREFIX = "metrics.context.";
 
-    @Deprecated
-    public static final String AUTO_INCLUDE_JMX_REPORTER_CONFIG = "auto.include.jmx.reporter";
-    public static final String AUTO_INCLUDE_JMX_REPORTER_DOC = "Deprecated. Whether to automatically include JmxReporter even if it's not listed in <code>metric.reporters</code>. This configuration will be removed in Kafka 4.0, users should instead include <code>org.apache.kafka.common.metrics.JmxReporter</code> in <code>metric.reporters</code> in order to enable the JmxReporter.";
-
     public static final String SECURITY_PROTOCOL_CONFIG = "security.protocol";
-    public static final String SECURITY_PROTOCOL_DOC = "Protocol used to communicate with brokers. Valid values are: " +
-        String.join(", ", SecurityProtocol.names()) + ".";
+    public static final String SECURITY_PROTOCOL_DOC = "Protocol used to communicate with brokers.";
     public static final String DEFAULT_SECURITY_PROTOCOL = "PLAINTEXT";
 
     public static final String SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG = "socket.connection.setup.timeout.ms";
@@ -193,7 +195,8 @@ public class CommonClientConfigs {
                                                           + "is considered failed and the group will rebalance in order to reassign the partitions to another member. "
                                                           + "For consumers using a non-null <code>group.instance.id</code> which reach this timeout, partitions will not be immediately reassigned. "
                                                           + "Instead, the consumer will stop sending heartbeats and partitions will be reassigned "
-                                                          + "after expiration of <code>session.timeout.ms</code>. This mirrors the behavior of a static consumer which has shutdown.";
+                                                          + "after expiration of the session timeout (defined by the client config <code>session.timeout.ms</code> if using the Classic rebalance protocol, or by the broker config <code>group.consumer.session.timeout.ms</code> if using the Consumer protocol). "
+                                                          + "This mirrors the behavior of a static consumer which has shutdown.";
 
     public static final String REBALANCE_TIMEOUT_MS_CONFIG = "rebalance.timeout.ms";
     public static final String REBALANCE_TIMEOUT_MS_DOC = "The maximum allowed time for each worker to join the group "
@@ -207,14 +210,18 @@ public class CommonClientConfigs {
                                                         + "to the broker. If no heartbeats are received by the broker before the expiration of this session timeout, "
                                                         + "then the broker will remove this client from the group and initiate a rebalance. Note that the value "
                                                         + "must be in the allowable range as configured in the broker configuration by <code>group.min.session.timeout.ms</code> "
-                                                        + "and <code>group.max.session.timeout.ms</code>.";
+                                                        + "and <code>group.max.session.timeout.ms</code>. Note that this client configuration is not supported when <code>group.protocol</code> "
+                                                        + "is set to \"consumer\". In that case, session timeout is controlled by the broker config <code>group.consumer.session.timeout.ms</code>.";
 
     public static final String HEARTBEAT_INTERVAL_MS_CONFIG = "heartbeat.interval.ms";
     public static final String HEARTBEAT_INTERVAL_MS_DOC = "The expected time between heartbeats to the consumer "
                                                            + "coordinator when using Kafka's group management facilities. Heartbeats are used to ensure that the "
                                                            + "consumer's session stays active and to facilitate rebalancing when new consumers join or leave the group. "
-                                                           + "The value must be set lower than <code>session.timeout.ms</code>, but typically should be set no higher "
-                                                           + "than 1/3 of that value. It can be adjusted even lower to control the expected time for normal rebalances.";
+                                                           + "This config is only supported if <code>group.protocol</code> is set to \"classic\". In that case, "
+                                                           + "the value must be set lower than <code>session.timeout.ms</code>, but typically should be set no higher "
+                                                           + "than 1/3 of that value. It can be adjusted even lower to control the expected time for normal rebalances."
+                                                           + "If <code>group.protocol</code> is set to \"consumer\", this config is not supported, as "
+                                                           + "the heartbeat interval is controlled by the broker with <code>group.consumer.heartbeat.interval.ms</code>.";
 
     public static final String DEFAULT_API_TIMEOUT_MS_CONFIG = "default.api.timeout.ms";
     public static final String DEFAULT_API_TIMEOUT_MS_DOC = "Specifies the timeout (in milliseconds) for client APIs. " +
@@ -230,8 +237,15 @@ public class CommonClientConfigs {
             "Brokers appear unavailable when disconnected and no current retry attempt is in-progress. " +
             "Consider increasing <code>reconnect.backoff.ms</code> and <code>reconnect.backoff.max.ms</code> and " +
             "decreasing <code>socket.connection.setup.timeout.ms</code> and <code>socket.connection.setup.timeout.max.ms</code> " +
-            "for the client.";
-    public static final String DEFAULT_METADATA_RECOVERY_STRATEGY = MetadataRecoveryStrategy.NONE.name;
+            "for the client. Rebootstrap is also triggered if connection cannot be established to any of the brokers for " +
+            "<code>metadata.recovery.rebootstrap.trigger.ms</code> milliseconds or if server requests rebootstrap.";
+    public static final String DEFAULT_METADATA_RECOVERY_STRATEGY = MetadataRecoveryStrategy.REBOOTSTRAP.name;
+
+    public static final String METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG = "metadata.recovery.rebootstrap.trigger.ms";
+    public static final String METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC = "If a client configured to rebootstrap using " +
+            "<code>metadata.recovery.strategy=rebootstrap</code> is unable to obtain metadata from any of the brokers in the last known " +
+            "metadata for this interval, client repeats the bootstrap process using <code>bootstrap.servers</code> configuration.";
+    public static final long DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS = 300 * 1000;
 
     /**
      * Postprocess the configuration so that exponential backoff is disabled when reconnect backoff
@@ -300,15 +314,8 @@ public class CommonClientConfigs {
     }
 
     public static List<MetricsReporter> metricsReporters(Map<String, Object> clientIdOverride, AbstractConfig config) {
-        List<MetricsReporter> reporters = config.getConfiguredInstances(CommonClientConfigs.METRIC_REPORTER_CLASSES_CONFIG,
+        return config.getConfiguredInstances(CommonClientConfigs.METRIC_REPORTER_CLASSES_CONFIG,
                 MetricsReporter.class, clientIdOverride);
-        if (config.getBoolean(CommonClientConfigs.AUTO_INCLUDE_JMX_REPORTER_CONFIG) &&
-                reporters.stream().noneMatch(r -> JmxReporter.class.equals(r.getClass()))) {
-            JmxReporter jmxReporter = new JmxReporter();
-            jmxReporter.configure(config.originals(clientIdOverride));
-            reporters.add(jmxReporter);
-        }
-        return reporters;
     }
 
     public static Optional<ClientTelemetryReporter> telemetryReporter(String clientId, AbstractConfig config) {

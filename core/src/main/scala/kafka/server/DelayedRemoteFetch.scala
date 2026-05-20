@@ -18,11 +18,15 @@
 package kafka.server
 
 import com.yammer.metrics.core.Meter
+import kafka.utils.Logging
 import org.apache.kafka.common.TopicIdPartition
 import org.apache.kafka.common.errors._
 import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.server.LogReadResult
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
-import org.apache.kafka.storage.internals.log.{FetchParams, FetchPartitionData, LogOffsetMetadata, RemoteLogReadResult, RemoteStorageFetchInfo}
+import org.apache.kafka.server.purgatory.DelayedOperation
+import org.apache.kafka.server.storage.log.{FetchParams, FetchPartitionData}
+import org.apache.kafka.storage.internals.log.{LogOffsetMetadata, RemoteLogReadResult, RemoteStorageFetchInfo}
 
 import java.util.concurrent.{CompletableFuture, Future, TimeUnit}
 import java.util.{Optional, OptionalInt, OptionalLong}
@@ -41,7 +45,7 @@ class DelayedRemoteFetch(remoteFetchTask: Future[Void],
                          localReadResults: Seq[(TopicIdPartition, LogReadResult)],
                          replicaManager: ReplicaManager,
                          responseCallback: Seq[(TopicIdPartition, FetchPartitionData)] => Unit)
-  extends DelayedOperation(remoteFetchMaxWaitMs) {
+  extends DelayedOperation(remoteFetchMaxWaitMs) with Logging {
 
   if (fetchParams.isFromFollower) {
     throw new IllegalStateException(s"The follower should not invoke remote fetch. Fetch params are: $fetchParams")
@@ -111,9 +115,9 @@ class DelayedRemoteFetch(remoteFetchTask: Future[Void],
             result.leaderLogStartOffset,
             info.records,
             Optional.empty(),
-            if (result.lastStableOffset.isDefined) OptionalLong.of(result.lastStableOffset.get) else OptionalLong.empty(),
+            if (result.lastStableOffset.isPresent) OptionalLong.of(result.lastStableOffset.getAsLong) else OptionalLong.empty(),
             info.abortedTransactions,
-            if (result.preferredReadReplica.isDefined) OptionalInt.of(result.preferredReadReplica.get) else OptionalInt.empty(),
+            if (result.preferredReadReplica.isPresent) OptionalInt.of(result.preferredReadReplica.getAsInt) else OptionalInt.empty(),
             false)
         }
       } else {

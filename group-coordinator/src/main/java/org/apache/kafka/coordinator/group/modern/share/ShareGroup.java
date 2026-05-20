@@ -16,12 +16,14 @@
  */
 package org.apache.kafka.coordinator.group.modern.share;
 
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.ApiException;
+import org.apache.kafka.common.errors.GroupIdNotFoundException;
 import org.apache.kafka.common.errors.UnknownMemberIdException;
 import org.apache.kafka.common.message.ShareGroupDescribeResponseData;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.coordinator.group.CoordinatorRecord;
-import org.apache.kafka.coordinator.group.CoordinatorRecordHelpers;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
+import org.apache.kafka.coordinator.group.GroupCoordinatorRecordHelpers;
 import org.apache.kafka.coordinator.group.OffsetExpirationCondition;
 import org.apache.kafka.coordinator.group.modern.ModernGroup;
 import org.apache.kafka.image.TopicsImage;
@@ -30,6 +32,7 @@ import org.apache.kafka.timeline.TimelineObject;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -63,6 +66,35 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
         public String toLowerCaseString() {
             return lowerCaseName;
         }
+    }
+
+    /**
+     * A record class to hold the value representing ShareGroupStatePartitionMetadata for the TimelineHashmap
+     * keyed on share group id.
+     *
+     * @param initializedTopics Map of set of partition ids keyed on the topic id.
+     * @param deletingTopics    Set of topic ids.
+     */
+    public record ShareGroupStatePartitionMetadataInfo(
+        Map<Uuid, InitMapValue> initializingTopics,
+        Map<Uuid, InitMapValue> initializedTopics,
+        Set<Uuid> deletingTopics
+    ) {
+    }
+
+    /**
+     * Represents the value part for the initializing and initialized topic partitions in
+     * ShareGroupStatePartitionMetadataValue
+     *
+     * @param name          Topic name
+     * @param partitions    Set of partitions in the topic
+     * @param timestamp     Timestamp at which the record was replayed
+     */
+    public record InitMapValue(
+        String name,
+        Set<Integer> partitions,
+        long timestamp
+    ) {
     }
 
     /**
@@ -131,11 +163,12 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
      *                          created if it does not exist.
      *
      * @return A ShareGroupMember.
+     * @throws UnknownMemberIdException when the member does not exist and createIfNotExists is false.
      */
     public ShareGroupMember getOrMaybeCreateMember(
         String memberId,
         boolean createIfNotExists
-    ) {
+    ) throws UnknownMemberIdException {
         ShareGroupMember member = members.get(memberId);
         if (member != null) return member;
 
@@ -161,9 +194,9 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
         }
 
         ShareGroupMember oldMember = members.put(newMember.memberId(), newMember);
-        maybeUpdateSubscribedTopicNamesAndGroupSubscriptionType(oldMember, newMember);
-        maybeUpdatePartitionEpoch(oldMember, newMember);
+        maybeUpdateSubscribedTopicNames(oldMember, newMember);
         maybeUpdateGroupState();
+        maybeUpdateGroupSubscriptionType();
     }
 
     /**
@@ -173,9 +206,9 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
      */
     public void removeMember(String memberId) {
         ShareGroupMember oldMember = members.remove(memberId);
-        maybeUpdateSubscribedTopicNamesAndGroupSubscriptionType(oldMember, null);
-        maybeRemovePartitionEpoch(oldMember);
+        maybeUpdateSubscribedTopicNames(oldMember, null);
         maybeUpdateGroupState();
+        maybeUpdateGroupSubscriptionType();
     }
 
     @Override
@@ -184,9 +217,9 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
         String groupInstanceId,
         int memberEpoch,
         boolean isTransactional,
-        short apiVersion
+        int apiVersion
     ) {
-        throw new UnsupportedOperationException("validateOffsetCommit is not supported for Share Groups.");
+        throw new GroupIdNotFoundException(String.format("Group %s is not a consumer group.", groupId));
     }
 
     @Override
@@ -195,12 +228,12 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
         int memberEpoch,
         long lastCommittedOffset
     ) {
-        throw new UnsupportedOperationException("validateOffsetFetch is not supported for Share Groups.");
+        throw new GroupIdNotFoundException(String.format("Group %s is not a consumer group.", groupId));
     }
 
     @Override
     public void validateOffsetDelete() {
-        throw new UnsupportedOperationException("validateOffsetDelete is not supported for Share Groups.");
+        throw new GroupIdNotFoundException(String.format("Group %s is not a consumer group.", groupId));
     }
 
     /**
@@ -208,6 +241,14 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
      */
     @Override
     public void validateDeleteGroup() throws ApiException {
+        validateEmptyGroup();
+    }
+
+    public void validateOffsetsAlterable() throws ApiException {
+        validateEmptyGroup();
+    }
+
+    public void validateEmptyGroup() {
         if (state() != ShareGroupState.EMPTY) {
             throw Errors.NON_EMPTY_GROUP.exception();
         }
@@ -220,7 +261,21 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
      */
     @Override
     public void createGroupTombstoneRecords(List<CoordinatorRecord> records) {
-        records.add(CoordinatorRecordHelpers.newGroupEpochTombstoneRecord(groupId(), GroupType.SHARE));
+        members().forEach((memberId, member) ->
+            records.add(GroupCoordinatorRecordHelpers.newShareGroupCurrentAssignmentTombstoneRecord(groupId(), memberId))
+        );
+
+        members().forEach((memberId, member) ->
+            records.add(GroupCoordinatorRecordHelpers.newShareGroupTargetAssignmentTombstoneRecord(groupId(), memberId))
+        );
+        records.add(GroupCoordinatorRecordHelpers.newShareGroupTargetAssignmentEpochTombstoneRecord(groupId()));
+
+        members().forEach((memberId, member) ->
+            records.add(GroupCoordinatorRecordHelpers.newShareGroupMemberSubscriptionTombstoneRecord(groupId(), memberId))
+        );
+
+        records.add(GroupCoordinatorRecordHelpers.newShareGroupStatePartitionMetadataTombstoneRecord(groupId()));
+        records.add(GroupCoordinatorRecordHelpers.newShareGroupEpochTombstoneRecord(groupId()));
     }
 
     @Override
@@ -251,33 +306,6 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
         state.set(newState);
     }
 
-    /**
-     * Updates the partition epochs based on the old and the new member.
-     *
-     * @param oldMember The old member.
-     * @param newMember The new member.
-     */
-    private void maybeUpdatePartitionEpoch(
-        ShareGroupMember oldMember,
-        ShareGroupMember newMember
-    ) {
-        maybeRemovePartitionEpoch(oldMember);
-        addPartitionEpochs(newMember.assignedPartitions(), newMember.memberEpoch());
-    }
-
-    /**
-     * Removes the partition epochs for the provided member.
-     *
-     * @param oldMember The old member.
-     */
-    private void maybeRemovePartitionEpoch(
-        ShareGroupMember oldMember
-    ) {
-        if (oldMember != null) {
-            removePartitionEpochs(oldMember.assignedPartitions(), oldMember.memberEpoch());
-        }
-    }
-
     public ShareGroupDescribeResponseData.DescribedGroup asDescribedGroup(
         long committedOffset,
         String defaultAssignor,
@@ -297,5 +325,10 @@ public class ShareGroup extends ModernGroup<ShareGroupMember> {
             )
         );
         return describedGroup;
+    }
+
+    @Override
+    public boolean shouldExpire() {
+        return false;
     }
 }

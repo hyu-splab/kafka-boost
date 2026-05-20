@@ -22,15 +22,13 @@ import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.MockTime;
-import org.apache.kafka.streams.StreamsConfig;
-import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
 import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
 import org.apache.kafka.streams.processor.internals.SerdeGetter;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
-import org.apache.kafka.test.MockInternalNewProcessorContext;
+import org.apache.kafka.test.MockInternalProcessorContext;
 import org.apache.kafka.test.StreamsTestUtils;
 import org.apache.kafka.test.TestUtils;
 
@@ -65,8 +63,8 @@ public class RocksDBTimeOrderedKeyValueBufferTest {
     public void setUp() {
         final Metrics metrics = new Metrics();
         offset = 0;
-        streamsMetrics = new StreamsMetricsImpl(metrics, "test-client", StreamsConfig.METRICS_LATEST, new MockTime());
-        context = new MockInternalNewProcessorContext<>(StreamsTestUtils.getStreamsConfig(), new TaskId(0, 0), TestUtils.tempDirectory());
+        streamsMetrics = new StreamsMetricsImpl(metrics, "test-client", "processId", new MockTime());
+        context = new MockInternalProcessorContext<>(StreamsTestUtils.getStreamsConfig(), new TaskId(0, 0), TestUtils.tempDirectory());
     }
 
     private void createBuffer(final Duration grace, final Serde<String> serde) {
@@ -74,7 +72,7 @@ public class RocksDBTimeOrderedKeyValueBufferTest {
 
         buffer = new RocksDBTimeOrderedKeyValueBuffer<>(store, serde, serde, grace, "testing", false);
         buffer.setSerdesIfNull(serdeGetter);
-        buffer.init((StateStoreContext) context, store);
+        buffer.init(context, store);
     }
 
     private boolean pipeRecord(final String key, final String value, final long time) {
@@ -83,6 +81,7 @@ public class RocksDBTimeOrderedKeyValueBufferTest {
         return buffer.put(time, record, context.recordContext());
     }
 
+    @SuppressWarnings({"rawtypes", "unchecked"})
     @Test
     public void shouldReturnIfRecordWasAdded() {
         when(serdeGetter.keySerde()).thenReturn((Serde) new Serdes.StringSerde());
@@ -113,6 +112,7 @@ public class RocksDBTimeOrderedKeyValueBufferTest {
         assertThat(count.get(), equalTo(1));
     }
 
+    @SuppressWarnings({"rawtypes", "unchecked"})
     @Test
     public void shouldAddAndEvictRecordTwice() {
         when(serdeGetter.keySerde()).thenReturn((Serde) new Serdes.StringSerde());
@@ -145,6 +145,7 @@ public class RocksDBTimeOrderedKeyValueBufferTest {
         assertThat(count.get(), equalTo(1));
     }
 
+    @SuppressWarnings({"rawtypes", "unchecked"})
     @Test
     public void shouldAddRecordsTwiceAndEvictRecordsOnce() {
         when(serdeGetter.keySerde()).thenReturn((Serde) new Serdes.StringSerde());
@@ -159,6 +160,7 @@ public class RocksDBTimeOrderedKeyValueBufferTest {
         assertThat(count.get(), equalTo(2));
     }
 
+    @SuppressWarnings({"rawtypes", "unchecked"})
     @Test
     public void shouldDropLateRecords() {
         when(serdeGetter.keySerde()).thenReturn((Serde) new Serdes.StringSerde());
@@ -181,6 +183,7 @@ public class RocksDBTimeOrderedKeyValueBufferTest {
         assertNumSizeAndTimestamp(buffer, 2, 1, 84);
     }
 
+    @SuppressWarnings({"rawtypes", "unchecked"})
     @Test
     public void shouldHandleCollidingKeys() {
         when(serdeGetter.keySerde()).thenReturn((Serde) new Serdes.StringSerde());

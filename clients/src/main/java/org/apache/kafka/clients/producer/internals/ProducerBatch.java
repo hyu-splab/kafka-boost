@@ -72,9 +72,6 @@ public final class ProducerBatch {
     private final AtomicInteger attempts = new AtomicInteger(0);
     private final boolean isSplitBatch;
     private final AtomicReference<FinalState> finalState = new AtomicReference<>(null);
-    private boolean bufferDeallocated = false;
-    // Tracks if the batch has been sent to the NetworkClient
-    private boolean inflight = false;
 
     int recordCount;
     int maxRecordSize;
@@ -115,7 +112,7 @@ public final class ProducerBatch {
      */
     void maybeUpdateLeaderEpoch(OptionalInt latestLeaderEpoch) {
         if (latestLeaderEpoch.isPresent()
-            && (!currentLeaderEpoch.isPresent() || currentLeaderEpoch.getAsInt() < latestLeaderEpoch.getAsInt())) {
+            && (currentLeaderEpoch.isEmpty() || currentLeaderEpoch.getAsInt() < latestLeaderEpoch.getAsInt())) {
             log.trace("For {}, leader will be updated, currentLeaderEpoch: {}, attemptsWhenLeaderLastChanged:{}, latestLeaderEpoch: {}, current attempt: {}",
                 this, currentLeaderEpoch, attemptsWhenLeaderLastChanged, latestLeaderEpoch, attempts);
             attemptsWhenLeaderLastChanged = attempts();
@@ -582,22 +579,6 @@ public final class ProducerBatch {
 
     public boolean sequenceHasBeenReset() {
         return reopened;
-    }
-
-    public boolean isBufferDeallocated() {
-        return bufferDeallocated;
-    }
-
-    public void markBufferDeallocated() {
-        bufferDeallocated = true;
-    }
-
-    public boolean isInflight() {
-        return inflight;
-    }
-
-    public void setInflight(boolean inflight) {
-        this.inflight = inflight;
     }
 
     // VisibleForTesting

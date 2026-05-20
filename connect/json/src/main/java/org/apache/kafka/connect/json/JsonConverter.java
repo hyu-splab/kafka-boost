@@ -53,10 +53,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumMap;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
-
-import static org.apache.kafka.common.utils.Utils.mkSet;
+import java.util.Set;
 
 /**
  * Implementation of {@link Converter} and {@link HeaderConverter} that uses JSON to store schemas and objects. By
@@ -104,9 +102,7 @@ public class JsonConverter implements Converter, HeaderConverter, Versioned {
             if (schema == null || keySchema.type() == Schema.Type.STRING) {
                 if (!value.isObject())
                     throw new DataException("Maps with string fields should be encoded as JSON objects, but found " + value.getNodeType());
-                Iterator<Map.Entry<String, JsonNode>> fieldIt = value.fields();
-                while (fieldIt.hasNext()) {
-                    Map.Entry<String, JsonNode> entry = fieldIt.next();
+                for (Map.Entry<String, JsonNode> entry : value.properties()) {
                     result.put(entry.getKey(), convertToConnect(valueSchema, entry.getValue(), config));
                 }
             } else {
@@ -150,10 +146,9 @@ public class JsonConverter implements Converter, HeaderConverter, Versioned {
         LOGICAL_CONVERTERS.put(Decimal.LOGICAL_NAME, new LogicalTypeConverter() {
             @Override
             public JsonNode toJson(final Schema schema, final Object value, final JsonConverterConfig config) {
-                if (!(value instanceof BigDecimal))
+                if (!(value instanceof BigDecimal decimal))
                     throw new DataException("Invalid type for Decimal, expected BigDecimal but was " + value.getClass());
 
-                final BigDecimal decimal = (BigDecimal) value;
                 switch (config.decimalFormat()) {
                     case NUMERIC:
                         return JSON_NODE_FACTORY.numberNode(decimal);
@@ -242,25 +237,25 @@ public class JsonConverter implements Converter, HeaderConverter, Versioned {
     /**
      * Creates a JsonConvert initializing serializer and deserializer.
      *
-     * @param enableAfterburner permits to enable/disable the registration of Jackson Afterburner module.
+     * @param enableBlackbird permits to enable/disable the registration of Jackson Blackbird module.
      * <p>
      * NOTE: This is visible only for testing
      */
-    public JsonConverter(boolean enableAfterburner) {
+    public JsonConverter(boolean enableBlackbird) {
         serializer = new JsonSerializer(
-            mkSet(),
+            Set.of(),
             JSON_NODE_FACTORY,
-            enableAfterburner
+            enableBlackbird
         );
 
         deserializer = new JsonDeserializer(
-            mkSet(
+            Set.of(
                 // this ensures that the JsonDeserializer maintains full precision on
                 // floating point numbers that cannot fit into float64
                 DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS
             ),
             JSON_NODE_FACTORY,
-            enableAfterburner
+            enableBlackbird
         );
     }
 
@@ -542,9 +537,7 @@ public class JsonConverter implements Converter, HeaderConverter, Versioned {
 
         JsonNode schemaParamsNode = jsonSchema.get(JsonSchema.SCHEMA_PARAMETERS_FIELD_NAME);
         if (schemaParamsNode != null && schemaParamsNode.isObject()) {
-            Iterator<Map.Entry<String, JsonNode>> paramsIt = schemaParamsNode.fields();
-            while (paramsIt.hasNext()) {
-                Map.Entry<String, JsonNode> entry = paramsIt.next();
+            for (Map.Entry<String, JsonNode> entry : schemaParamsNode.properties()) {
                 JsonNode paramValue = entry.getValue();
                 if (!paramValue.isTextual())
                     throw new DataException("Schema parameters must have string values.");

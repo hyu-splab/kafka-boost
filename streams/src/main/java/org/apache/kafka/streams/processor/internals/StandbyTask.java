@@ -49,8 +49,7 @@ public class StandbyTask extends AbstractTask implements Task {
     private final Sensor updateSensor;
     private final StreamsMetricsImpl streamsMetrics;
 
-    @SuppressWarnings("rawtypes")
-    protected final InternalProcessorContext processorContext;
+    protected final InternalProcessorContext<?, ?> processorContext;
 
     /**
      * @param id              the ID of this task
@@ -61,7 +60,6 @@ public class StandbyTask extends AbstractTask implements Task {
      * @param stateMgr        the {@link ProcessorStateManager} for this task
      * @param stateDirectory  the {@link StateDirectory} created by the thread
      */
-    @SuppressWarnings("rawtypes")
     StandbyTask(final TaskId id,
                 final Set<TopicPartition> inputPartitions,
                 final ProcessorTopology topology,
@@ -70,7 +68,7 @@ public class StandbyTask extends AbstractTask implements Task {
                 final ProcessorStateManager stateMgr,
                 final StateDirectory stateDirectory,
                 final ThreadCache cache,
-                final InternalProcessorContext processorContext) {
+                final InternalProcessorContext<?, ?> processorContext) {
         super(
             id,
             topology,
@@ -181,7 +179,7 @@ public class StandbyTask extends AbstractTask implements Task {
      *                          or flushing state store get IO errors; such error should cause the thread to die
      */
     @Override
-    public Map<TopicPartition, OffsetAndMetadata> prepareCommit() {
+    public Map<TopicPartition, OffsetAndMetadata> prepareCommit(final boolean clean) {
         switch (state()) {
             case CREATED:
                 log.debug("Skipped preparing created task for commit");
@@ -191,7 +189,11 @@ public class StandbyTask extends AbstractTask implements Task {
             case RUNNING:
             case SUSPENDED:
                 // do not need to flush state store caches in pre-commit since nothing would be sent for standby tasks
-                log.debug("Prepared {} task for committing", state());
+                if (!clean) {
+                    log.debug("Skipped preparing {} standby task with id {} for commit since the task is getting closed dirty.", state(), id);
+                } else {
+                    log.debug("Prepared {} task for committing", state());
+                }
 
                 break;
 
@@ -199,7 +201,7 @@ public class StandbyTask extends AbstractTask implements Task {
                 throw new IllegalStateException("Illegal state " + state() + " while preparing standby task " + id + " for committing ");
         }
 
-        return Collections.emptyMap();
+        return clean ? Collections.emptyMap() : null;
     }
 
     @Override
@@ -331,11 +333,6 @@ public class StandbyTask extends AbstractTask implements Task {
     @Override
     public void addRecords(final TopicPartition partition, final Iterable<ConsumerRecord<byte[], byte[]>> records) {
         throw new IllegalStateException("Attempted to add records to task " + id() + " for invalid input partition " + partition);
-    }
-
-    @SuppressWarnings("rawtypes")
-    InternalProcessorContext processorContext() {
-        return processorContext;
     }
 
     /**

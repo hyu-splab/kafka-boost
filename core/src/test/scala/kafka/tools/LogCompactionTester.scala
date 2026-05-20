@@ -32,7 +32,7 @@ import org.apache.kafka.clients.consumer.{Consumer, ConsumerConfig, KafkaConsume
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.serialization.{ByteArraySerializer, StringDeserializer}
-import org.apache.kafka.common.utils.{AbstractIterator, Utils}
+import org.apache.kafka.common.utils.{Exit, AbstractIterator, Utils}
 import org.apache.kafka.server.util.CommandLineUtils
 
 import scala.jdk.CollectionConverters._
@@ -142,8 +142,8 @@ object LogCompactionTester {
     val adminClient = Admin.create(adminConfig)
 
     try {
-      val topicConfigs = Map(TopicConfig.CLEANUP_POLICY_CONFIG -> TopicConfig.CLEANUP_POLICY_COMPACT)
-      val newTopics = topics.map(name => new NewTopic(name, 1, 1.toShort).configs(topicConfigs.asJava)).asJava
+      val topicConfigs = java.util.Map.of(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT)
+      val newTopics = topics.map(name => new NewTopic(name, 1, 1.toShort).configs(topicConfigs)).asJava
       adminClient.createTopics(newTopics).all.get
 
       var pendingTopics: Seq[String] = Seq()

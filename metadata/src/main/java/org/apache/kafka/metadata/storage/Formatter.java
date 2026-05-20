@@ -29,8 +29,8 @@ import org.apache.kafka.raft.DynamicVoters;
 import org.apache.kafka.raft.KafkaRaftClient;
 import org.apache.kafka.raft.VoterSet;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
+import org.apache.kafka.server.common.Feature;
 import org.apache.kafka.server.common.FeatureVersion;
-import org.apache.kafka.server.common.Features;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.MetadataVersion;
 import org.apache.kafka.snapshot.FileRawSnapshotWriter;
@@ -43,7 +43,6 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -52,7 +51,6 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import java.util.stream.Collectors;
 
 import static org.apache.kafka.common.internals.Topic.CLUSTER_METADATA_TOPIC_PARTITION;
 import static org.apache.kafka.server.common.KRaftVersion.KRAFT_VERSION_0;
@@ -70,7 +68,7 @@ public class Formatter {
     /**
      * The features that are supported.
      */
-    private List<Features> supportedFeatures = Features.PRODUCTION_FEATURES;
+    private List<Feature> supportedFeatures = Feature.PRODUCTION_FEATURES;
 
     /**
      * The current node id.
@@ -117,7 +115,7 @@ public class Formatter {
     /**
      * The arguments passed to --add-scram
      */
-    private List<String> scramArguments = Collections.emptyList();
+    private List<String> scramArguments = List.of();
 
     /**
      * The name of the initial controller listener.
@@ -127,7 +125,7 @@ public class Formatter {
     /**
      * The metadata log directory.
      */
-    private String metadataLogDirectory = null;
+    private Optional<String> metadataLogDirectory = Optional.empty();
 
     /**
      * The initial KIP-853 voters.
@@ -140,7 +138,7 @@ public class Formatter {
         return this;
     }
 
-    public Formatter setSupportedFeatures(List<Features> supportedFeatures) {
+    public Formatter setSupportedFeatures(List<Feature> supportedFeatures) {
         this.supportedFeatures = supportedFeatures;
         return this;
     }
@@ -168,6 +166,10 @@ public class Formatter {
     public Formatter addDirectory(String directory) {
         this.directories.add(directory);
         return this;
+    }
+
+    public Collection<String> directories() {
+        return directories;
     }
 
     public Formatter setReleaseVersion(MetadataVersion releaseVersion) {
@@ -201,6 +203,11 @@ public class Formatter {
     }
 
     public Formatter setMetadataLogDirectory(String metadataLogDirectory) {
+        this.metadataLogDirectory = Optional.of(metadataLogDirectory);
+        return this;
+    }
+
+    public Formatter setMetadataLogDirectory(Optional<String> metadataLogDirectory) {
         this.metadataLogDirectory = metadataLogDirectory;
         return this;
     }
@@ -240,13 +247,12 @@ public class Formatter {
         if (controllerListenerName == null) {
             throw new FormatterException("You must specify the name of the initial controller listener.");
         }
-        if (metadataLogDirectory == null) {
-            throw new FormatterException("You must specify the metadata log directory.");
-        }
-        if (!directories.contains(metadataLogDirectory)) {
-            throw new FormatterException("The specified metadata log directory, " + metadataLogDirectory +
+        metadataLogDirectory.ifPresent(d -> {
+            if (!directories.contains(d)) {
+                throw new FormatterException("The specified metadata log directory, " + d +
                     " was not one of the given directories: " + directories);
-        }
+            }
+        });
         releaseVersion = calculateEffectiveReleaseVersion();
         featureLevels = calculateEffectiveFeatureLevels();
         this.bootstrapMetadata = calculateBootstrapMetadata();
@@ -277,10 +283,6 @@ public class Formatter {
     }
 
     MetadataVersion verifyReleaseVersion(MetadataVersion metadataVersion) {
-        if (!metadataVersion.isKRaftSupported()) {
-            throw new FormatterException(MetadataVersion.FEATURE_NAME + " " + metadataVersion +
-                " is too old to be supported.");
-        }
         if (!unstableFeatureVersionsEnabled) {
             if (!metadataVersion.isProduction()) {
                 throw new FormatterException(MetadataVersion.FEATURE_NAME + " " + metadataVersion +
@@ -291,7 +293,7 @@ public class Formatter {
     }
 
     Map<String, Short> calculateEffectiveFeatureLevels() {
-        Map<String, Features> nameToSupportedFeature = new TreeMap<>();
+        Map<String, Feature> nameToSupportedFeature = new TreeMap<>();
         supportedFeatures.forEach(feature -> nameToSupportedFeature.put(feature.featureName(), feature));
         Map<String, Short> newFeatureLevels = new TreeMap<>();
         // Verify that all specified features are known to us.
@@ -301,8 +303,7 @@ public class Formatter {
             if (!featureName.equals(MetadataVersion.FEATURE_NAME)) {
                 if (!nameToSupportedFeature.containsKey(featureName)) {
                     throw new FormatterException("Unsupported feature: " + featureName +
-                            ". Supported features are: " + nameToSupportedFeature.keySet().stream().
-                            collect(Collectors.joining(", ")));
+                            ". Supported features are: " + String.join(", ", nameToSupportedFeature.keySet()));
                 }
             }
             newFeatureLevels.put(featureName, level);
@@ -315,7 +316,7 @@ public class Formatter {
                     Optional.ofNullable(newFeatureLevels.get(KRaftVersion.FEATURE_NAME))));
             } else if (!newFeatureLevels.containsKey(supportedFeature.featureName())) {
                 newFeatureLevels.put(supportedFeature.featureName(),
-                    supportedFeature.defaultValue(releaseVersion));
+                    supportedFeature.defaultLevel(releaseVersion));
             }
         });
         // Verify that the specified features support the given levels. This requires the full
@@ -324,10 +325,10 @@ public class Formatter {
             String featureName = entry.getKey();
             if (!featureName.equals(MetadataVersion.FEATURE_NAME)) {
                 short level = entry.getValue();
-                Features supportedFeature = nameToSupportedFeature.get(featureName);
+                Feature supportedFeature = nameToSupportedFeature.get(featureName);
                 FeatureVersion featureVersion =
                     supportedFeature.fromFeatureLevel(level, unstableFeatureVersionsEnabled);
-                Features.validateVersion(featureVersion, newFeatureLevels);
+                Feature.validateVersion(featureVersion, newFeatureLevels);
             }
         }
         return newFeatureLevels;
@@ -416,7 +417,7 @@ public class Formatter {
             Map<String, DirectoryType> directoryTypes = new HashMap<>();
             for (String emptyLogDir : ensemble.emptyLogDirs()) {
                 DirectoryType directoryType = DirectoryType.calculate(emptyLogDir,
-                    metadataLogDirectory,
+                    metadataLogDirectory.orElse(""),
                     nodeId,
                     initialControllers);
                 directoryTypes.put(emptyLogDir, directoryType);
@@ -435,7 +436,7 @@ public class Formatter {
                     directoryTypes.get(writeLogDir).description(), writeLogDir,
                     MetadataVersion.FEATURE_NAME, releaseVersion);
                 Files.createDirectories(Paths.get(writeLogDir));
-                BootstrapDirectory bootstrapDirectory = new BootstrapDirectory(writeLogDir, Optional.empty());
+                BootstrapDirectory bootstrapDirectory = new BootstrapDirectory(writeLogDir);
                 bootstrapDirectory.writeBinaryFile(bootstrapMetadata);
                 if (directoryTypes.get(writeLogDir).isDynamicMetadataDirectory()) {
                     writeDynamicQuorumSnapshot(writeLogDir,
@@ -485,7 +486,7 @@ public class Formatter {
         ) {
             if (!logDir.equals(metadataLogDirectory)) {
                 return LOG_DIRECTORY;
-            } else if (!initialControllers.isPresent()) {
+            } else if (initialControllers.isEmpty()) {
                 return STATIC_METADATA_DIRECTORY;
             } else if (initialControllers.get().voters().containsKey(nodeId)) {
                 return DYNAMIC_METADATA_VOTER_DIRECTORY;
@@ -514,7 +515,7 @@ public class Formatter {
                 Snapshots.BOOTSTRAP_SNAPSHOT_ID)).
             setKraftVersion(KRaftVersion.fromFeatureLevel(kraftVersion)).
             setVoterSet(Optional.of(voterSet));
-        try (RecordsSnapshotWriter writer = builder.build(new MetadataRecordSerde())) {
+        try (RecordsSnapshotWriter<ApiMessageAndVersion> writer = builder.build(new MetadataRecordSerde())) {
             writer.freeze();
         }
     }

@@ -33,6 +33,7 @@ import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.SecurityDisabledException;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.errors.TransactionAbortedException;
 import org.apache.kafka.common.errors.UnknownServerException;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
@@ -75,13 +76,13 @@ public class RecordCollectorImpl implements RecordCollector {
     private final TaskId taskId;
     private final StreamsProducer streamsProducer;
     private final ProductionExceptionHandler productionExceptionHandler;
-    private final boolean eosEnabled;
     private final Map<TopicPartition, Long> offsets;
 
     private final StreamsMetricsImpl streamsMetrics;
     private final Sensor droppedRecordsSensor;
     private final Map<String, Sensor> producedSensorByTopic = new HashMap<>();
 
+    // we get `sendException` from "singleton" `StreamsProducer` to share it across all instances of `RecordCollectorImpl`
     private final AtomicReference<KafkaException> sendException;
 
     /**
@@ -98,7 +99,6 @@ public class RecordCollectorImpl implements RecordCollector {
         this.streamsProducer = streamsProducer;
         this.sendException = streamsProducer.sendException();
         this.productionExceptionHandler = productionExceptionHandler;
-        this.eosEnabled = streamsProducer.eosEnabled();
         this.streamsMetrics = streamsMetrics;
 
         final String threadId = Thread.currentThread().getName();
@@ -121,7 +121,7 @@ public class RecordCollectorImpl implements RecordCollector {
 
     @Override
     public void initialize() {
-        if (eosEnabled) {
+        if (streamsProducer.eosEnabled()) {
             streamsProducer.initTransaction();
         }
     }
@@ -159,9 +159,9 @@ public class RecordCollectorImpl implements RecordCollector {
                     fatal
                 );
             }
-            if (partitions.size() > 0) {
+            if (!partitions.isEmpty()) {
                 final Optional<Set<Integer>> maybeMulticastPartitions = partitioner.partitions(topic, key, value, partitions.size());
-                if (!maybeMulticastPartitions.isPresent()) {
+                if (maybeMulticastPartitions.isEmpty()) {
                     // A null//empty partition indicates we should use the default partitioner
                     send(topic, key, value, headers, null, timestamp, keySerializer, valueSerializer, processorNodeId, context);
                 } else {
@@ -259,6 +259,10 @@ public class RecordCollectorImpl implements RecordCollector {
 
         final ProducerRecord<byte[], byte[]> serializedRecord = new ProducerRecord<>(topic, partition, timestamp, keyBytes, valBytes, headers);
 
+        // As many records could be in-flight,
+        // freeing raw records in the context to reduce memory pressure
+        freeRawInputRecordFromContext(context);
+
         streamsProducer.send(serializedRecord, (metadata, exception) -> {
             try {
                 // if there's already an exception record, skip logging offsets or new exceptions
@@ -311,6 +315,12 @@ public class RecordCollectorImpl implements RecordCollector {
         });
     }
 
+    private static void freeRawInputRecordFromContext(final InternalProcessorContext<Void, Void> context) {
+        if (context != null && context.recordContext() != null) {
+            context.recordContext().freeRawRecord();
+        }
+    }
+
     private <K, V> void handleException(final ProductionExceptionHandler.SerializationExceptionOrigin origin,
                                         final String topic,
                                         final K key,
@@ -348,10 +358,14 @@ public class RecordCollectorImpl implements RecordCollector {
                 ),
                 serializationException
             );
-            throw new FailedProcessingException("Fatal user code error in production error callback", fatalUserException);
+            throw new FailedProcessingException(
+                "Fatal user code error in production error callback",
+                processorNodeId,
+                fatalUserException
+            );
         }
 
-        if (response == ProductionExceptionHandlerResponse.FAIL) {
+        if (maybeFailResponse(response) == ProductionExceptionHandlerResponse.FAIL) {
             throw new StreamsException(
                 String.format(
                     "Unable to serialize record. ProducerRecord(topic=[%s], partition=[%d], timestamp=[%d]",
@@ -384,7 +398,9 @@ public class RecordCollectorImpl implements RecordCollector {
                 recordContext.headers(),
                 processorNodeId,
                 taskId,
-                recordContext.timestamp()
+                recordContext.timestamp(),
+                context.recordContext().sourceRawKey(),
+                context.recordContext().sourceRawValue()
             ) :
             new DefaultErrorHandlerContext(
                 context,
@@ -394,7 +410,9 @@ public class RecordCollectorImpl implements RecordCollector {
                 new RecordHeaders(),
                 processorNodeId,
                 taskId,
-                -1L
+                -1L,
+                null,
+                null
             );
     }
 
@@ -438,49 +456,67 @@ public class RecordCollectorImpl implements RecordCollector {
             errorMessage += "\nWritten offsets would not be recorded and no more records would be sent since the producer is fenced, " +
                 "indicating the task may be migrated out";
             sendException.set(new TaskMigratedException(errorMessage, productionException));
+        } else if (productionException instanceof TransactionAbortedException) {
+            // swallow silently
+            //
+            // TransactionAbortedException is only thrown after `abortTransaction()` was called,
+            // so it's only a followup error, and Kafka Streams is already handling the original error
         } else {
-            if (productionException instanceof RetriableException) {
+            final ProductionExceptionHandlerResponse response;
+            try {
+                response = Objects.requireNonNull(
+                    productionExceptionHandler.handle(
+                        errorHandlerContext(context, processorNodeId),
+                        serializedRecord,
+                        productionException
+                    ),
+                    "Invalid ProductionExceptionHandler response."
+                );
+            } catch (final Exception fatalUserException) {
+                // while Java distinguishes checked vs unchecked exceptions, other languages
+                // like Scala or Kotlin do not, and thus we need to catch `Exception`
+                // (instead of `RuntimeException`) to work well with those languages
+                log.error(
+                    "Production error callback failed after production error for record {}",
+                    serializedRecord,
+                    productionException
+                );
+                sendException.set(new FailedProcessingException(
+                    "Fatal user code error in production error callback",
+                    processorNodeId,
+                    fatalUserException
+                    )
+                );
+                return;
+            }
+
+            if (productionException instanceof RetriableException && response == ProductionExceptionHandlerResponse.RETRY) {
                 errorMessage += "\nThe broker is either slow or in bad state (like not having enough replicas) in responding the request, " +
                     "or the connection to broker was interrupted sending the request or receiving the response. " +
                     "\nConsider overwriting `max.block.ms` and /or " +
                     "`delivery.timeout.ms` to a larger value to wait longer for such scenarios and avoid timeout errors";
                 sendException.set(new TaskCorruptedException(Collections.singleton(taskId)));
             } else {
-                final ProductionExceptionHandlerResponse response;
-                try {
-                    response = Objects.requireNonNull(
-                        productionExceptionHandler.handle(
-                            errorHandlerContext(context, processorNodeId),
-                            serializedRecord,
-                            productionException
-                        ),
-                        "Invalid ProductionExceptionHandler response."
-                    );
-                } catch (final Exception fatalUserException) {
-                    // while Java distinguishes checked vs unchecked exceptions, other languages
-                    // like Scala or Kotlin do not, and thus we need to catch `Exception`
-                    // (instead of `RuntimeException`) to work well with those languages
-                    log.error(
-                        "Production error callback failed after production error for record {}",
-                        serializedRecord,
-                        productionException
-                    );
-                    sendException.set(new FailedProcessingException("Fatal user code error in production error callback", fatalUserException));
-                    return;
-                }
-
-                if (response == ProductionExceptionHandlerResponse.FAIL) {
+                if (maybeFailResponse(response) == ProductionExceptionHandlerResponse.FAIL) {
                     errorMessage += "\nException handler choose to FAIL the processing, no more records would be sent.";
                     sendException.set(new StreamsException(errorMessage, productionException));
                 } else {
                     errorMessage += "\nException handler choose to CONTINUE processing in spite of this error but written offsets would not be recorded.";
                     droppedRecordsSensor.record();
                 }
-
             }
         }
 
         log.error(errorMessage, productionException);
+    }
+
+    private ProductionExceptionHandlerResponse maybeFailResponse(final ProductionExceptionHandlerResponse response) {
+        if (response == ProductionExceptionHandlerResponse.RETRY) {
+            log.warn("ProductionExceptionHandler returned RETRY for a non-retriable exception. Will treat it as FAIL.");
+            return ProductionExceptionHandlerResponse.FAIL;
+        } else {
+            return response;
+        }
     }
 
     private boolean isFatalException(final Exception exception) {
@@ -533,7 +569,7 @@ public class RecordCollectorImpl implements RecordCollector {
     public void closeDirty() {
         log.info("Closing record collector dirty");
 
-        if (eosEnabled) {
+        if (streamsProducer.eosEnabled()) {
             // We may be closing dirty because the commit failed, so we must abort the transaction to be safe
             streamsProducer.abortTransaction();
         }
@@ -554,14 +590,14 @@ public class RecordCollectorImpl implements RecordCollector {
 
     @Override
     public Map<TopicPartition, Long> offsets() {
-        return Collections.unmodifiableMap(new HashMap<>(offsets));
+        return Map.copyOf(offsets);
     }
 
     private void checkForException() {
         final KafkaException exception = sendException.get();
 
         if (exception != null) {
-            sendException.set(null);
+            sendException.compareAndSet(exception, null);
             throw exception;
         }
     }

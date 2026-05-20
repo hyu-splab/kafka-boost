@@ -17,7 +17,6 @@
 
 package org.apache.kafka.jmh.producer;
 
-import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.MetadataSnapshot;
 import org.apache.kafka.clients.producer.internals.BufferPool;
 import org.apache.kafka.clients.producer.internals.ProducerBatch;
@@ -145,7 +144,6 @@ public class RecordAccumulatorFlushBenchmark {
             metrics,
             "producer-metrics",
             time,
-            new ApiVersions(),
             null,
             new BufferPool(TOTAL_SIZE, BATCH_SIZE, metrics, time, "producer-metrics")
         );
@@ -165,7 +163,6 @@ public class RecordAccumulatorFlushBenchmark {
                 Record.EMPTY_HEADERS,
                 null,
                 1000L,
-                false,
                 time.milliseconds(),
                 cluster
             );

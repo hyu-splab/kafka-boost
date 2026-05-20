@@ -45,7 +45,7 @@ import static org.apache.kafka.streams.StreamsConfig.PROCESSING_EXCEPTION_HANDLE
 
 public class ProcessorNode<KIn, VIn, KOut, VOut> {
 
-    private final Logger log = LoggerFactory.getLogger(ProcessorNode.class);
+    private static final Logger log = LoggerFactory.getLogger(ProcessorNode.class);
     private final List<ProcessorNode<KOut, VOut, ?, ?>> children;
     private final Map<String, ProcessorNode<KOut, VOut, ?, ?>> childByName;
 
@@ -99,7 +99,7 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
         return children;
     }
 
-    ProcessorNode<KOut, VOut, ?, ?> getChild(final String childName) {
+    ProcessorNode<KOut, VOut, ?, ?> child(final String childName) {
         return childByName.get(childName);
     }
 
@@ -207,15 +207,6 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
             // while Java distinguishes checked vs unchecked exceptions, other languages
             // like Scala or Kotlin do not, and thus we need to catch `Exception`
             // (instead of `RuntimeException`) to work well with those languages
-
-            // If the processing exception handler is not set (e.g., for global threads),
-            // rethrow the exception to let it bubble up to the uncaught exception handler.
-            // The processing exception handler is only set for regular stream tasks, not for
-            // global state update tasks which use a different error handling mechanism.
-            if (processingExceptionHandler == null) {
-                throw processingException;
-            }
-
             final ErrorHandlerContext errorHandlerContext = new DefaultErrorHandlerContext(
                 null, // only required to pass for DeserializationExceptionHandler
                 internalProcessorContext.topic(),
@@ -224,7 +215,10 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
                 internalProcessorContext.headers(),
                 internalProcessorContext.currentNode().name(),
                 internalProcessorContext.taskId(),
-                internalProcessorContext.timestamp());
+                internalProcessorContext.timestamp(),
+                internalProcessorContext.recordContext().sourceRawKey(),
+                internalProcessorContext.recordContext().sourceRawValue()
+            );
 
             final ProcessingExceptionHandler.ProcessingHandlerResponse response;
             try {
@@ -241,7 +235,11 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
                     errorHandlerContext,
                     processingException
                 );
-                throw new FailedProcessingException("Fatal user code error in processing error callback", fatalUserException);
+                throw new FailedProcessingException(
+                    "Fatal user code error in processing error callback",
+                    internalProcessorContext.currentNode().name(),
+                    fatalUserException
+                );
             }
 
             if (response == ProcessingExceptionHandler.ProcessingHandlerResponse.FAIL) {
@@ -249,7 +247,7 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
                      " a processing error. If you would rather have the streaming pipeline" +
                      " continue after a processing error, please set the " +
                      PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG + " appropriately.");
-                throw new FailedProcessingException(processingException);
+                throw new FailedProcessingException(internalProcessorContext.currentNode().name(), processingException);
             } else {
                 droppedRecordsSensor.record();
             }

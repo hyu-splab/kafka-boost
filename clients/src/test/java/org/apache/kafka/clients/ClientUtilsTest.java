@@ -27,7 +27,6 @@ import org.mockito.MockedStatic;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Stream;
@@ -88,38 +87,38 @@ public class ClientUtilsTest {
                 List<InetSocketAddress> validatedAddresses = checkWithLookup(Collections.singletonList(hostname + ":" + port));
                 assertEquals(2, inetSocketAddress.constructed().size());
                 assertEquals(2, validatedAddresses.size());
-                assertTrue(validatedAddresses.containsAll(Arrays.asList(
+                assertTrue(validatedAddresses.containsAll(List.of(
                     inetSocketAddress.constructed().get(0),
                     inetSocketAddress.constructed().get(1)))
                 );
                 validatedAddresses.forEach(address -> assertEquals(port, address.getPort()));
                 validatedAddresses.stream().map(InetSocketAddress::getHostName).forEach(
-                    hostName -> assertTrue(Arrays.asList(canonicalHostname1, canonicalHostname2).contains(hostName))
+                    hostName -> assertTrue(List.of(canonicalHostname1, canonicalHostname2).contains(hostName))
                 );
             }
         }
     }
 
-    static Stream<List<String>> provideValidBrokerAddressTestCases() {
+    @Test
+    public void testValidBrokerAddress() {
+        List<String> validBrokerAddress = List.of("localhost:9997", "localhost:9998", "localhost:9999");
+        assertDoesNotThrow(() -> ClientUtils.parseAndValidateAddresses(validBrokerAddress, ClientDnsLookup.USE_ALL_DNS_IPS));
+    }
+
+    static Stream<List<String>> provideInvalidBrokerAddressTestCases() {
         return Stream.of(
-            Arrays.asList("localhost:9997", "localhost:9998", "localhost:9999"),
-            Arrays.asList("localhost:9997", "localhost:9998", " localhost:9999"),
+            List.of("localhost:9997\nlocalhost:9998\nlocalhost:9999"),
+            List.of("localhost:9997", "localhost:9998", " localhost:9999"),
             // Intentionally provide a single string, as users may provide space-separated brokers, which will be parsed as a single string.
-            Arrays.asList("localhost:9997 localhost:9998 localhost:9999")
+            List.of("localhost:9997 localhost:9998 localhost:9999")
         );
     }
 
     @ParameterizedTest
-    @MethodSource("provideValidBrokerAddressTestCases")
-    public void testValidBrokerAddress(List<String> addresses) {
-        assertDoesNotThrow(() -> ClientUtils.parseAndValidateAddresses(addresses, ClientDnsLookup.USE_ALL_DNS_IPS));
-    }
-
-    @Test
-    public void testInvalidBrokerAddress() {
-        List<String> invalidBrokerAddress = Collections.singletonList("localhost:9997\nlocalhost:9998\nlocalhost:9999");
+    @MethodSource("provideInvalidBrokerAddressTestCases")
+    public void testInvalidBrokerAddress(List<String> addresses) {
         assertThrows(ConfigException.class,
-            () -> ClientUtils.parseAndValidateAddresses(invalidBrokerAddress, ClientDnsLookup.USE_ALL_DNS_IPS));
+            () -> ClientUtils.parseAndValidateAddresses(addresses, ClientDnsLookup.USE_ALL_DNS_IPS));
     }
 
     @Test

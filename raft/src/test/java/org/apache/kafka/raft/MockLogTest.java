@@ -32,6 +32,7 @@ import org.apache.kafka.common.record.Records;
 import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.server.common.OffsetAndEpoch;
 import org.apache.kafka.snapshot.RawSnapshotReader;
 import org.apache.kafka.snapshot.RawSnapshotWriter;
 
@@ -48,12 +49,11 @@ import org.junit.jupiter.params.provider.ArgumentsSource;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -92,10 +92,10 @@ public class MockLogTest {
         int epoch = 2;
         SimpleRecord recordOne = new SimpleRecord("one".getBytes());
         SimpleRecord recordTwo = new SimpleRecord("two".getBytes());
-        appendAsLeader(Arrays.asList(recordOne, recordTwo), epoch);
+        appendAsLeader(List.of(recordOne, recordTwo), epoch);
 
         SimpleRecord recordThree = new SimpleRecord("three".getBytes());
-        appendAsLeader(Collections.singleton(recordThree), epoch);
+        appendAsLeader(Set.of(recordThree), epoch);
 
         assertEquals(0L, log.startOffset());
         assertEquals(3L, log.endOffset().offset());
@@ -148,7 +148,7 @@ public class MockLogTest {
         List<SimpleRecord> expectedRecords = new ArrayList<>();
 
         expectedRecords.add(recordOne);
-        appendAsLeader(Collections.singleton(recordOne), epoch);
+        appendAsLeader(Set.of(recordOne), epoch);
 
         assertEquals(new OffsetAndEpoch(expectedRecords.size(), epoch), log.endOffsetForEpoch(epoch));
         assertEquals(epoch, log.lastFetchedEpoch());
@@ -158,7 +158,7 @@ public class MockLogTest {
         SimpleRecord recordThree = new SimpleRecord("three".getBytes());
         expectedRecords.add(recordTwo);
         expectedRecords.add(recordThree);
-        appendAsLeader(Arrays.asList(recordTwo, recordThree), epoch);
+        appendAsLeader(List.of(recordTwo, recordThree), epoch);
 
         assertEquals(new OffsetAndEpoch(expectedRecords.size(), epoch), log.endOffsetForEpoch(epoch));
         assertEquals(epoch, log.lastFetchedEpoch());
@@ -274,7 +274,7 @@ public class MockLogTest {
         recordTwoBuffer.putInt(2);
         SimpleRecord recordTwo = new SimpleRecord(recordTwoBuffer);
 
-        appendAsLeader(Arrays.asList(recordOne, recordTwo), epoch);
+        appendAsLeader(List.of(recordOne, recordTwo), epoch);
 
         Records records = log.read(0, Isolation.UNCOMMITTED).records;
 
@@ -282,7 +282,7 @@ public class MockLogTest {
         for (Record record : records.records()) {
             extractRecords.add(record.value());
         }
-        assertEquals(Arrays.asList(recordOne.value(), recordTwo.value()), extractRecords);
+        assertEquals(List.of(recordOne.value(), recordTwo.value()), extractRecords);
     }
 
     @Test
@@ -428,9 +428,9 @@ public class MockLogTest {
 
     @Test
     void testInvalidLeaderEpoch() {
-        long previousEndOffset = log.endOffset().offset();
-        int epoch = log.lastFetchedEpoch() + 1;
-        int numberOfRecords = 10;
+        var previousEndOffset = log.endOffset().offset();
+        var epoch = log.lastFetchedEpoch() + 1;
+        var numberOfRecords = 10;
 
         MemoryRecords batchWithValidEpoch = MemoryRecords.withRecords(
             previousEndOffset,
@@ -452,12 +452,12 @@ public class MockLogTest {
                 .toArray(SimpleRecord[]::new)
         );
 
-        ByteBuffer buffer = ByteBuffer.allocate(batchWithValidEpoch.sizeInBytes() + batchWithInvalidEpoch.sizeInBytes());
+        var buffer = ByteBuffer.allocate(batchWithValidEpoch.sizeInBytes() + batchWithInvalidEpoch.sizeInBytes());
         buffer.put(batchWithValidEpoch.buffer());
         buffer.put(batchWithInvalidEpoch.buffer());
         buffer.flip();
 
-        MemoryRecords records = MemoryRecords.readableRecords(buffer);
+        var records = MemoryRecords.readableRecords(buffer);
 
         log.appendAsFollower(records, epoch);
 
@@ -552,13 +552,23 @@ public class MockLogTest {
 
         // Test snapshot id for the first epoch
         log.createNewSnapshot(new OffsetAndEpoch(numberOfRecords, firstEpoch)).get().close();
-        log.createNewSnapshot(new OffsetAndEpoch(numberOfRecords - 1, firstEpoch)).get().close();
-        log.createNewSnapshot(new OffsetAndEpoch(1, firstEpoch)).get().close();
 
         // Test snapshot id for the second epoch
         log.createNewSnapshot(new OffsetAndEpoch(2 * numberOfRecords, secondEpoch)).get().close();
-        log.createNewSnapshot(new OffsetAndEpoch(2 * numberOfRecords - 1, secondEpoch)).get().close();
-        log.createNewSnapshot(new OffsetAndEpoch(numberOfRecords + 1, secondEpoch)).get().close();
+    }
+
+    @Test
+    public void testCreateSnapshotInMiddleOfBatch() {
+        int numberOfRecords = 10;
+        int epoch = 1;
+
+        appendBatch(numberOfRecords, epoch);
+        log.updateHighWatermark(new LogOffsetMetadata(numberOfRecords));
+
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> log.createNewSnapshot(new OffsetAndEpoch(numberOfRecords - 1, epoch))
+        );
     }
 
     @Test
