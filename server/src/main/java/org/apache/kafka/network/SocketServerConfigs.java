@@ -166,13 +166,13 @@ public class SocketServerConfigs {
     public static final int BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_DEFAULT = 100;
     public static final String BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_DOC = "The number of check cycles (ticks) that must elapse after a new channel is created before it becomes eligible for booster assignment. This cooldown period allows the request pattern to stabilize as new channels may experience transient surges during startup.";
 
-    public static final String BOOSTER_ASSIGN_COOLDOWN_TICKS_CONFIG = "booster.assign.cooldown.ticks";
-    public static final int BOOSTER_ASSIGN_COOLDOWN_TICKS_DEFAULT = 10;
-    public static final String BOOSTER_ASSIGN_COOLDOWN_TICKS_DOC = "The number of check cycles (ticks) that must elapse after a channel's booster assignment is released before it can be considered for reassignment again. This cooldown period ensures the channel has sufficient time to accumulate fresh performance statistics while running in the standard path.";
+    public static final String BOOSTER_GLOBAL_REASSIGN_COOLDOWN_TICKS_CONFIG = "booster.global.reassign.cooldown.ticks";
+    public static final int BOOSTER_GLOBAL_REASSIGN_COOLDOWN_TICKS_DEFAULT = 10;
+    public static final String BOOSTER_GLOBAL_REASSIGN_COOLDOWN_TICKS_DOC = "The number of check cycles (ticks) that must elapse after any of channel reassignment before manager conducts reassignment again. This cooldown period ensures the channel has sufficient time to accumulate fresh performance statistics while running in the reassigned path.";
 
-    public static final String BOOSTER_RETURN_COOLDOWN_TICKS_CONFIG = "booster.migration.cooldown.ticks";
-    public static final int BOOSTER_RETURN_COOLDOWN_TICKS_DEFAULT = 100;
-    public static final String BOOSTER_RETURN_COOLDOWN_TICKS_DOC = "The minimum number of check cycles (ticks) a channel must remain in the booster path before it becomes eligible for return to the standard path. This cooldown period prevents rapid toggling (thrashing) of channels between dedicated and standard processing paths.";
+    public static final String BOOSTER_CHANNEL_REASSIGN_COOLDOWN_TICKS_CONFIG = "booster.channel.reassign.cooldown.ticks";
+    public static final int BOOSTER_CHANNEL_REASSIGN_COOLDOWN_TICKS_DEFAULT = 100;
+    public static final String BOOSTER_REASSIGN_COOLDOWN_TICKS_DOC = "The minimum number of check cycles (ticks) a channel must remain in the booster path or normal path after reassignment. This cooldown period prevents rapid toggling (thrashing) of channels between dedicated and standard processing paths.";
 
     public static final String BOOSTER_SATURATION_WINDOW_SIZE_CONFIG = "booster.saturation.window.size";
     public static final int BOOSTER_SATURATION_WINDOW_SIZE_DEFAULT = 10;
@@ -206,8 +206,12 @@ public class SocketServerConfigs {
             .define(NUM_DEDICATED_THREADS_CONFIG, INT, NUM_DEDICATED_THREADS_DEFAULT, atLeast(0), LOW, NUM_DEDICATED_THREADS_DOC)
             .define(BOOSTER_CHECK_INTERVAL_MS_CONFIG, INT, BOOSTER_CHECK_INTERVAL_MS_DEFAULT, atLeast(10), MEDIUM, BOOSTER_CHECK_INTERVAL_MS_DOC)
             .define(BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_CONFIG, INT, BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_DEFAULT, atLeast(0), MEDIUM, BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_DOC)
-            .define(BOOSTER_ASSIGN_COOLDOWN_TICKS_CONFIG, INT, BOOSTER_ASSIGN_COOLDOWN_TICKS_DEFAULT, atLeast(0), MEDIUM, BOOSTER_ASSIGN_COOLDOWN_TICKS_DOC)
-            .define(BOOSTER_RETURN_COOLDOWN_TICKS_CONFIG, INT, BOOSTER_RETURN_COOLDOWN_TICKS_DEFAULT, atLeast(0), MEDIUM, BOOSTER_RETURN_COOLDOWN_TICKS_DOC)
+            .define(BOOSTER_GLOBAL_REASSIGN_COOLDOWN_TICKS_CONFIG, INT,
+                BOOSTER_GLOBAL_REASSIGN_COOLDOWN_TICKS_DEFAULT, atLeast(0), MEDIUM,
+                BOOSTER_GLOBAL_REASSIGN_COOLDOWN_TICKS_DOC)
+            .define(BOOSTER_CHANNEL_REASSIGN_COOLDOWN_TICKS_CONFIG, INT,
+                BOOSTER_CHANNEL_REASSIGN_COOLDOWN_TICKS_DEFAULT, atLeast(0), MEDIUM,
+                BOOSTER_REASSIGN_COOLDOWN_TICKS_DOC)
             .define(BOOSTER_SATURATION_WINDOW_SIZE_CONFIG, INT, BOOSTER_SATURATION_WINDOW_SIZE_DEFAULT, atLeast(1), MEDIUM, BOOSTER_SATURATION_WINDOW_SIZE_DOC)
             .define(BOOSTER_IDLE_WINDOW_SIZE_CONFIG, INT, BOOSTER_IDLE_WINDOW_SIZE_DEFAULT, atLeast(1), MEDIUM, BOOSTER_IDLE_WINDOW_SIZE_DOC)
             .define(BOOSTER_REQUESTS_STAT_WINDOW_SIZE_CONFIG, INT, BOOSTER_REQUESTS_STAT_WINDOW_SIZE_DEFAULT, atLeast(1), MEDIUM, BOOSTER_REQUESTS_STAT_WINDOW_SIZE_DOC);

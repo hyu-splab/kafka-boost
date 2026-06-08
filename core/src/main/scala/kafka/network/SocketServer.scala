@@ -640,8 +640,8 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
     time,
     config.boosterCheckIntervalMs,
     config.boosterNewChannelCooldownTicks,
-    config.boosterAssignCooldownTicks,
-    config.boosterReturnCooldownTicks,
+    config.boosterGlobalReassignCooldownTicks,
+    config.boosterChannelReassignCooldownTicks,
     config.boosterSaturationWindowSize,
     config.boosterIdleWindowSize,
     config.boosterRequestsStatWindowSize
@@ -2218,8 +2218,8 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
                                  time: Time,
                                  tickIntervalMs: Int,
                                  newChannelCooldownTicks: Int,
-                                 assignCooldownTicks: Int,
-                                 returnCooldownTicks: Int,
+                                 globalReassignCooldownTicks: Int,
+                                 channelReassignCooldownTicks: Int,
                                  saturatedChannelDetectionWindowSize: Int,
                                  idleChannelDetectionWindowSize: Int,
                                  processedRequestsCountWindowSize: Int) extends Runnable with Logging {
@@ -2231,7 +2231,7 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
   private val normalChannelStats = new mutable.LinkedHashMap[KafkaChannel, NormalChannelStats]()
   private val boostedChannelStats = new mutable.LinkedHashMap[KafkaChannel, BoostedChannelStats]()
 
-  private var assignCooldownCounter = 0
+  private var globalReassignCooldownCounter = 0
 
   val shouldRun: AtomicBoolean = new AtomicBoolean(true)
   private val started: AtomicBoolean = new AtomicBoolean()
@@ -2322,7 +2322,7 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
           unBoostOneChannelIfNeeded()
 
           tickCnt += 1
-          if (assignCooldownCounter > 0) assignCooldownCounter -= 1
+          if (globalReassignCooldownCounter > 0) globalReassignCooldownCounter -= 1
           sleepToNextTick(loopStartNs)
         } catch {
           // We catch all the throwables to prevent the acceptor thread from exiting on exceptions due
@@ -2345,14 +2345,14 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
     }.foreach { case (channel, stat) =>
       stat.processor.reserveReassign(channel, stat.originProcessor)
       idleDedicatedProcessors += stat.processor
-      assignCooldownCounter = assignCooldownTicks
+      globalReassignCooldownCounter = globalReassignCooldownTicks
       normalChannelStats.put(channel, new NormalChannelStats(stat.originProcessor, 0))
     }
   }
 
   private def boostOneChannelIfNeeded(): Unit = {
     normalChannelStats.filter { case (channel, stat) =>
-      !channel.isMigrating && stat.isFullySaturated && assignCooldownCounter <= 0
+      !channel.isMigrating && stat.isFullySaturated && globalReassignCooldownCounter <= 0
     }.maxByOption { case (_, stat) =>
       stat.getProcessedRequestsCountAvg
     }.foreach { case (channel, stat) =>
@@ -2363,7 +2363,7 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
           p,
           stat.processor,
           stat.getProcessedRequestsCountAvg.toLong,
-          returnCooldownTicks
+          channelReassignCooldownTicks
         ))
         idleDedicatedProcessors.remove(p)
       })
