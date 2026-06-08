@@ -18,6 +18,7 @@
 package org.apache.kafka.jmh.metadata;
 
 import kafka.coordinator.transaction.TransactionCoordinator;
+import kafka.network.IRequestChannel;
 import kafka.network.RequestChannel;
 import kafka.server.AutoTopicCreationManager;
 import kafka.server.ClientQuotaManager;
@@ -100,7 +101,7 @@ import scala.Option;
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 
 public class KRaftMetadataRequestBenchmark {
-    private final RequestChannel requestChannel = Mockito.mock(RequestChannel.class, Mockito.withSettings().stubOnly());
+    private final IRequestChannel requestChannel = Mockito.mock(RequestChannel.class, Mockito.withSettings().stubOnly());
     private final RequestChannelMetrics requestChannelMetrics = Mockito.mock(RequestChannelMetrics.class);
     private final ReplicaManager replicaManager = Mockito.mock(ReplicaManager.class);
     private final GroupCoordinator groupCoordinator = Mockito.mock(GroupCoordinator.class);

@@ -23,7 +23,7 @@ import java.util.{Collections, OptionalLong}
 import java.util.Map.Entry
 import java.util.concurrent.CompletableFuture
 import java.util.function.Consumer
-import kafka.network.RequestChannel
+import kafka.network.{IRequestChannel, RequestChannel}
 import kafka.raft.RaftManager
 import kafka.server.QuotaFactory.QuotaManagers
 import kafka.server.logger.RuntimeLoggerManager
@@ -66,7 +66,7 @@ import scala.jdk.CollectionConverters._
  * Request handler for Controller APIs
  */
 class ControllerApis(
-  val requestChannel: RequestChannel,
+  val requestChannel: IRequestChannel,
   val authorizerPlugin: Option[Plugin[Authorizer]],
   val quotas: QuotaManagers,
   val time: Time,
@@ -1104,7 +1104,7 @@ class ControllerApis(
 }
 
 case class ControllerApisBuilder(
-  requestChannel: RequestChannel = null,
+  requestChannel: IRequestChannel = null,
   authorizerPlugin: Option[Plugin[Authorizer]] = None,
   quotas: QuotaManagers = null,
   time: Time = Time.SYSTEM,
@@ -1117,7 +1117,7 @@ case class ControllerApisBuilder(
   metadataCache: KRaftMetadataCache = null
 ) extends ApiRequestHandlerBuilder {
 
-  override def withRequestChannel(requestChannel: RequestChannel): ControllerApisBuilder = copy(requestChannel = requestChannel)
+  override def withRequestChannel(requestChannel: IRequestChannel): ControllerApisBuilder = copy(requestChannel = requestChannel)
 
   override def build(): ControllerApis = {
     if (requestChannel == null) throw new RuntimeException("you must set requestChannel")

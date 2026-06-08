@@ -132,6 +132,7 @@ public class Selector implements Selectable, AutoCloseable {
     //indicates if the previous call to poll was able to make progress in reading already-buffered data.
     //this is used to prevent tight loops when memory is not available to read any more data
     private boolean madeReadProgressLastPoll = true;
+    private boolean hasRemainedReadyKeys = false;
 
     /**
      * Create a new nioSelector
@@ -378,7 +379,10 @@ public class Selector implements Selectable, AutoCloseable {
 
     public void unregister(String id) {
         KafkaChannel channel = this.channels.remove(id);
-        if (channel != null) channel.unregisterSelector();
+        if (channel != null) {
+            keysWithBufferedRead.remove(channel.selectionKey());
+            channel.unregisterSelector();
+        }
     }
 
     public void reregister(KafkaChannel channel) throws IOException {
@@ -484,7 +488,7 @@ public class Selector implements Selectable, AutoCloseable {
 
         boolean dataInBuffers = !keysWithBufferedRead.isEmpty();
 
-        if (!immediatelyConnectedKeys.isEmpty() || (madeReadProgressLastCall && dataInBuffers))
+        if (hasRemainedReadyKeys || !immediatelyConnectedKeys.isEmpty() || (madeReadProgressLastCall && dataInBuffers))
             timeout = 0;
 
         if (!memoryPool.isOutOfMemory() && outOfMemory) {
@@ -504,7 +508,7 @@ public class Selector implements Selectable, AutoCloseable {
         long endSelect = time.nanoseconds();
         this.sensors.selectTime.record(endSelect - startSelect, time.milliseconds(), false);
 
-        if (numReadyKeys > 0 || !immediatelyConnectedKeys.isEmpty() || dataInBuffers) {
+        if (numReadyKeys > 0 || hasRemainedReadyKeys || !immediatelyConnectedKeys.isEmpty() || dataInBuffers) {
             Set<SelectionKey> readyKeys = this.nioSelector.selectedKeys();
 
             // Poll from channels that have buffered data (but nothing more from the underlying socket)
@@ -519,6 +523,7 @@ public class Selector implements Selectable, AutoCloseable {
             pollSelectionKeys(readyKeys, false, endSelect);
             // Clear all selected keys so that they are excluded from the ready count for the next select
             readyKeys.clear();
+            hasRemainedReadyKeys = false;
 
             pollSelectionKeys(immediatelyConnectedKeys, true, endSelect);
             immediatelyConnectedKeys.clear();
@@ -535,6 +540,60 @@ public class Selector implements Selectable, AutoCloseable {
         // we use the time at the end of select to ensure that we don't close any connections that
         // have just been processed in pollSelectionKeys
         maybeCloseOldestConnection(endSelect);
+    }
+
+    public void pollWrites() throws IOException {
+        long startSelect = time.nanoseconds();
+        int numReadyKeys = select(0);
+        long endSelect = time.nanoseconds();
+        this.sensors.selectTime.record(endSelect - startSelect, time.milliseconds(), false);
+
+        if (numReadyKeys > 0 || hasRemainedReadyKeys) {
+            Set<SelectionKey> readyKeys = this.nioSelector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = readyKeys.iterator();
+            while (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+                KafkaChannel channel = channel(key);
+                if (channel == null) continue;
+
+                long channelStartTimeNanos = recordTimePerConnection ? time.nanoseconds() : 0;
+                boolean sendFailed = false;
+                String nodeId = channel.id();
+
+                sensors.maybeRegisterConnectionMetrics(nodeId);
+                if (idleExpiryManager != null)
+                    idleExpiryManager.update(nodeId, endSelect);
+
+                try {
+                    if (channel.isConnected() && !channel.ready() && !explicitlyMutedChannels.contains(channel)) continue;
+                    if (channel.ready() && channel.state() == ChannelState.NOT_CONNECTED)
+                        channel.state(ChannelState.READY);
+
+                    if (key.isReadable() && !explicitlyMutedChannels.contains(channel)) hasRemainedReadyKeys = true;
+                    long nowNanos = channelStartTimeNanos != 0 ? channelStartTimeNanos : endSelect;
+                    try {
+                        if (attemptWrite(key, channel, nowNanos)) {
+                            if (!key.isValid()) close(channel, CloseMode.GRACEFUL);
+                            keyIterator.remove();
+                        }
+                    } catch (Exception e) {
+                        sendFailed = true;
+                        throw e;
+                    }
+                } catch (Exception e) {
+                    String desc = String.format("%s (channelId=%s)", channel.socketDescription(), channel.id());
+                    if (e instanceof IOException) log.debug("Connection with {} disconnected", desc, e);
+                    else log.warn("Unexpected error from {}; closing connection", desc, e);
+                    close(channel, sendFailed ? CloseMode.NOTIFY_ONLY : CloseMode.GRACEFUL);
+                    keyIterator.remove();
+                } finally {
+                    maybeRecordTimePerConnection(channel, channelStartTimeNanos);
+                }
+            }
+            hasRemainedReadyKeys = (hasRemainedReadyKeys || !readyKeys.isEmpty());
+        }
+        long endIo = time.nanoseconds();
+        this.sensors.ioTime.record(endIo - endSelect, time.milliseconds(), false);
     }
 
     /**
@@ -667,13 +726,15 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
-    private void attemptWrite(SelectionKey key, KafkaChannel channel, long nowNanos) throws IOException {
+    private boolean attemptWrite(SelectionKey key, KafkaChannel channel, long nowNanos) throws IOException {
         if (channel.hasSend()
                 && channel.ready()
                 && key.isWritable()
                 && !channel.maybeBeginClientReauthentication(() -> nowNanos)) {
             write(channel);
+            return true;
         }
+        return false;
     }
 
     // package-private for testing

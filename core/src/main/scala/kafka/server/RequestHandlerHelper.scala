@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.network.RequestChannel
+import kafka.network.{IRequestChannel, RequestChannel}
 import kafka.server.QuotaFactory.QuotaManagers
 import org.apache.kafka.common.errors.ClusterAuthorizationException
 import org.apache.kafka.common.network.Send
@@ -26,7 +26,7 @@ import org.apache.kafka.common.utils.Time
 import org.apache.kafka.server.quota.ThrottleCallback
 
 class RequestHandlerHelper(
-  requestChannel: RequestChannel,
+  requestChannel: IRequestChannel,
   quotas: QuotaManagers,
   time: Time
 ) {

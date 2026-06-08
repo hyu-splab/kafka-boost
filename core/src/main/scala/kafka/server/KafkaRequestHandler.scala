@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.network.RequestChannel
+import kafka.network.{IRequestChannel, RequestChannel}
 import kafka.utils.Logging
 import kafka.server.KafkaRequestHandler.{threadCurrentRequest, threadRequestChannel}
 
@@ -38,12 +38,12 @@ trait ApiRequestHandler {
 
 trait ApiRequestHandlerBuilder {
   def build(): ApiRequestHandler
-  def withRequestChannel(requestChannel: RequestChannel): ApiRequestHandlerBuilder
+  def withRequestChannel(requestChannel: IRequestChannel): ApiRequestHandlerBuilder
 }
 
 object KafkaRequestHandler {
   // Support for scheduling callbacks on a request thread.
-  private val threadRequestChannel = new ThreadLocal[RequestChannel]
+  private val threadRequestChannel = new ThreadLocal[IRequestChannel]
   private val threadCurrentRequest = new ThreadLocal[RequestChannel.Request]
 
   // For testing
@@ -95,7 +95,7 @@ class KafkaRequestHandler(
   brokerId: Int,
   val aggregateIdleMeter: Meter,
   val totalHandlerThreads: AtomicInteger,
-  val requestChannel: RequestChannel,
+  val requestChannel: IRequestChannel,
   apis: ApiRequestHandler,
   time: Time,
   nodeName: String = "broker"

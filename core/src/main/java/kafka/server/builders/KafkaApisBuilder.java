@@ -18,7 +18,7 @@
 package kafka.server.builders;
 
 import kafka.coordinator.transaction.TransactionCoordinator;
-import kafka.network.RequestChannel;
+import kafka.network.IRequestChannel;
 import kafka.server.AutoTopicCreationManager;
 import kafka.server.FetchManager;
 import kafka.server.ForwardingManager;
@@ -48,7 +48,7 @@ import java.util.Optional;
 import scala.jdk.javaapi.OptionConverters;
 
 public class KafkaApisBuilder {
-    private RequestChannel requestChannel = null;
+    private IRequestChannel requestChannel = null;
     private ForwardingManager forwardingManager = null;
     private ReplicaManager replicaManager = null;
     private GroupCoordinator groupCoordinator = null;
@@ -72,7 +72,7 @@ public class KafkaApisBuilder {
     private ShareCoordinator shareCoordinator = null;
     private GroupConfigManager groupConfigManager = null;
 
-    public KafkaApisBuilder setRequestChannel(RequestChannel requestChannel) {
+    public KafkaApisBuilder setRequestChannel(IRequestChannel requestChannel) {
         this.requestChannel = requestChannel;
         return this;
     }

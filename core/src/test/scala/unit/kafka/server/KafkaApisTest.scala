@@ -19,7 +19,7 @@ package kafka.server
 
 import kafka.cluster.Partition
 import kafka.coordinator.transaction.{InitProducerIdResult, TransactionCoordinator}
-import kafka.network.RequestChannel
+import kafka.network.{IRequestChannel, RequestChannel}
 import kafka.server.QuotaFactory.QuotaManagers
 import kafka.server.metadata.KRaftMetadataCache
 import kafka.server.share.SharePartitionManager
@@ -122,7 +122,7 @@ import scala.collection.{Map, Seq, mutable}
 import scala.jdk.CollectionConverters._
 
 class KafkaApisTest extends Logging {
-  private val requestChannel: RequestChannel = mock(classOf[RequestChannel])
+  private val requestChannel: IRequestChannel = mock(classOf[RequestChannel])
   private val requestChannelMetrics: RequestChannelMetrics = mock(classOf[RequestChannelMetrics])
   private val replicaManager: ReplicaManager = mock(classOf[ReplicaManager])
   private val groupCoordinator: GroupCoordinator = mock(classOf[GroupCoordinator])

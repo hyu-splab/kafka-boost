@@ -144,7 +144,7 @@ class SocketServerTest {
     response
   }
 
-  private def receiveRequest(channel: RequestChannel, timeout: Long = 2000L): RequestChannel.Request = {
+  private def receiveRequest(channel: IRequestChannel, timeout: Long = 2000L): RequestChannel.Request = {
     channel.receiveRequest(timeout) match {
       case request: RequestChannel.Request => request
       case RequestChannel.WakeupRequest => throw new AssertionError("Unexpected wakeup received")
@@ -155,18 +155,18 @@ class SocketServerTest {
   }
 
   /* A simple request handler that just echos back the response */
-  def processRequest(channel: RequestChannel): Unit = {
+  def processRequest(channel: IRequestChannel): Unit = {
     processRequest(channel, receiveRequest(channel))
   }
 
-  def processRequest(channel: RequestChannel, request: RequestChannel.Request): Unit = {
+  def processRequest(channel: IRequestChannel, request: RequestChannel.Request): Unit = {
     val byteBuffer = request.body[AbstractRequest].serializeWithHeader(request.header)
     val send = new NetworkSend(request.context.connectionId, ByteBufferSend.sizePrefixed(byteBuffer))
     val headerLog = RequestConvertToJson.requestHeaderNode(request.header)
     channel.sendResponse(new RequestChannel.SendResponse(request, send, Some(headerLog), None))
   }
 
-  def processRequestNoOpResponse(channel: RequestChannel, request: RequestChannel.Request): Unit = {
+  def processRequestNoOpResponse(channel: IRequestChannel, request: RequestChannel.Request): Unit = {
     channel.sendNoOpResponse(request)
   }
 
@@ -2048,7 +2048,7 @@ class SocketServerTest {
 
   class TestableProcessor(id: Int,
                           time: Time,
-                          requestChannel: RequestChannel,
+                          requestChannel: IRequestChannel,
                           listenerName: ListenerName,
                           securityProtocol: SecurityProtocol,
                           config: KafkaConfig,

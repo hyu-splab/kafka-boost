@@ -17,7 +17,7 @@
 
 package kafka.tools
 
-import kafka.network.RequestChannel
+import kafka.network.{IRequestChannel, RequestChannel}
 import kafka.raft.RaftManager
 import kafka.server.{ApiRequestHandler, ApiRequestHandlerBuilder}
 import kafka.utils.Logging
@@ -34,7 +34,7 @@ import org.apache.kafka.server.common.RequestLocal
  */
 class TestRaftRequestHandler(
   raftManager: RaftManager[_],
-  requestChannel: RequestChannel,
+  requestChannel: IRequestChannel,
   time: Time,
   apiVersionManager: ApiVersionManager
 ) extends ApiRequestHandler with Logging {
@@ -116,12 +116,12 @@ class TestRaftRequestHandler(
 
 case class TestRaftRequestHandlerBuilder(
   raftManager: RaftManager[_] = null,
-  requestChannel: RequestChannel = null,
+  requestChannel: IRequestChannel = null,
   time: Time = Time.SYSTEM,
   apiVersionManager: ApiVersionManager = null
 ) extends ApiRequestHandlerBuilder {
 
-  override def withRequestChannel(requestChannel: RequestChannel): TestRaftRequestHandlerBuilder = copy(requestChannel = requestChannel)
+  override def withRequestChannel(requestChannel: IRequestChannel): TestRaftRequestHandlerBuilder = copy(requestChannel = requestChannel)
 
   override def build(): ApiRequestHandler = {
     if (raftManager == null) throw new RuntimeException("you must set raftManager")

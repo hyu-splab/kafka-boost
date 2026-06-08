@@ -431,7 +431,7 @@ private[network] class ClientBoostManager(listenerName: ListenerName,
   def newDedicatedProcessor(): DedicatedProcessor = {
     val id = idGenerator()
     val name = s"kafka-dedicated-thread-$listenerName-$securityProtocol-$id"
-    val dedicatedRequestChannel = new RequestChannel(20, time, apiVersionManager.newRequestMetrics)
+    val dedicatedRequestChannel = new DedicatedRequestChannel(20, time, apiVersionManager.newRequestMetrics)
     val processor = new Processor(
       id,
       time,
@@ -456,7 +456,7 @@ private[network] class ClientBoostManager(listenerName: ListenerName,
       apiRequestHandlerBuilder,
       processorInterceptorBuilders
     )
-    dedicatedRequestChannel.addProcessor(processor)
+    dedicatedRequestChannel.setProcessor(processor)
     DedicatedProcessor(processor, dedicatedRequestChannel)
   }
 }
@@ -956,7 +956,7 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
                             securityProtocol: SecurityProtocol,
                             connectionDisconnectListeners: Seq[ConnectionDisconnectListener]): DedicatedProcessor = {
     val name = s"kafka-dedicated-thread-$listenerName-$securityProtocol-$id"
-    val dedicatedRequestChannel = new RequestChannel(20, time, apiVersionManager.newRequestMetrics)
+    val dedicatedRequestChannel = new DedicatedRequestChannel(20, time, apiVersionManager.newRequestMetrics)
     val processor = new Processor(
       id,
       time,
@@ -981,15 +981,14 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
       apiRequestHandlerBuilder,
       processorInterceptorBuilders
     )
-    dedicatedRequestChannel.addProcessor(processor)
+    dedicatedRequestChannel.setProcessor(processor)
     DedicatedProcessor(processor, dedicatedRequestChannel)
   }
 }
 
-private[network] case class DedicatedProcessor(processor: Processor, requestChannel: RequestChannel) {
+private[network] case class DedicatedProcessor(processor: Processor, requestChannel: IRequestChannel) {
   def close(): Unit = {
     processor.close()
-    requestChannel.removeProcessor(processor.id)
     requestChannel.shutdown()
   }
 }
@@ -1026,7 +1025,7 @@ private[kafka] class Processor(
   val id: Int,
   time: Time,
   maxRequestSize: Int,
-  requestChannel: RequestChannel,
+  requestChannel: IRequestChannel,
   connectionQuotas: ConnectionQuotas,
   connectionsMaxIdleMs: Long,
   failedAuthenticationDelayMs: Int,
@@ -1063,6 +1062,7 @@ private[kafka] class Processor(
 
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
+  private val dedicatedResponseQueue = new util.ArrayDeque[RequestChannel.Response]()
 
   private case class DedicatedHandler(apis: ApiRequestHandler, requestLocal: RequestLocal) {}
 
@@ -1151,7 +1151,7 @@ private[kafka] class Processor(
           configureNewConnections()
           configureReConnections()
           // register any new responses for writing
-          processNewResponses()
+          processNewResponses(false)
           poll()
           processCompletedReceives()
           handleRequestIfExist()
@@ -1210,9 +1210,13 @@ private[kafka] class Processor(
     processException(errorMessage, throwable)
   }
 
-  private def processNewResponses(): Unit = {
+  private def processNewResponses(dedicated: Boolean): Boolean = {
     var currentResponse: RequestChannel.Response = null
-    while ({currentResponse = dequeueResponse(); currentResponse != null}) {
+    val responseGetter: () => RequestChannel.Response = {
+      if (dedicated) dequeueDedicatedResponse else dequeueResponse
+    }
+    var newResponseAdded = false
+    while ({currentResponse = responseGetter(); currentResponse != null}) {
       val channelId = currentResponse.request.context.connectionId
       interceptors.beforeProcessResponse(currentResponse)
       try {
@@ -1233,6 +1237,7 @@ private[kafka] class Processor(
             }
 
           case response: SendResponse =>
+            newResponseAdded = true
             sendResponse(response, response.responseSend)
           case response: CloseConnectionResponse =>
             updateRequestMetrics(response)
@@ -1257,6 +1262,7 @@ private[kafka] class Processor(
           processChannelException(channelId, s"Exception while processing response for $channelId", e)
       }
     }
+    newResponseAdded
   }
 
   // `protected` for test usage
@@ -1655,6 +1661,7 @@ private[kafka] class Processor(
         }
         req = requestChannel.receiveRequest(0)
       }
+      if (processNewResponses(true)) selector.pollWrites()
     })
   }
 
@@ -1690,8 +1697,20 @@ private[kafka] class Processor(
     wakeup()
   }
 
+  private[network] def enqueueDedicatedResponse(response: RequestChannel.Response): Unit = {
+    if (dedicatedHandler.isDefined) dedicatedResponseQueue.add(response)
+    else enqueueResponse(response)
+  }
+
   private def dequeueResponse(): RequestChannel.Response = {
     val response = responseQueue.poll()
+    if (response != null)
+      response.request.responseDequeueTimeNanos = Time.SYSTEM.nanoseconds
+    response
+  }
+
+  private def dequeueDedicatedResponse(): RequestChannel.Response = {
+    val response = dedicatedResponseQueue.poll()
     if (response != null)
       response.request.responseDequeueTimeNanos = Time.SYSTEM.nanoseconds
     response

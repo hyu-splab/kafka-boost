@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import kafka.network.RequestChannel
+import kafka.network.{IRequestChannel, RequestChannel}
 import kafka.raft.RaftManager
 import kafka.server.QuotaFactory.QuotaManagers
 import kafka.server.metadata.KRaftMetadataCache
@@ -108,7 +108,7 @@ class ControllerApisTest {
   private val brokerRack = "Rack1"
   private val clientID = "Client1"
   private val requestChannelMetrics: RequestChannelMetrics = mock(classOf[RequestChannelMetrics])
-  private val requestChannel: RequestChannel = mock(classOf[RequestChannel])
+  private val requestChannel: IRequestChannel = mock(classOf[RequestChannel])
   private val time = new MockTime
   private val clientQuotaManager: ClientQuotaManager = mock(classOf[ClientQuotaManager])
   private val clientRequestQuotaManager: ClientRequestQuotaManager = mock(classOf[ClientRequestQuotaManager])

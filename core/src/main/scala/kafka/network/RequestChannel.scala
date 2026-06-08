@@ -37,6 +37,7 @@ import org.apache.kafka.server.common.RequestLocal
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.network.RequestConvertToJson
 
+import java.util.concurrent.atomic.AtomicInteger
 import scala.jdk.CollectionConverters._
 import scala.jdk.OptionConverters.RichOption
 import scala.reflect.ClassTag
@@ -44,8 +45,8 @@ import scala.reflect.ClassTag
 object RequestChannel extends Logging {
   private val requestLogger = Logger("kafka.request.logger")
 
-  private val RequestQueueSizeMetric = "RequestQueueSize"
-  private val ResponseQueueSizeMetric = "ResponseQueueSize"
+  val RequestQueueSizeMetric = "RequestQueueSize"
+  val ResponseQueueSizeMetric = "ResponseQueueSize"
   val ProcessorMetricTag = "processor"
 
   /**
@@ -345,9 +346,55 @@ object RequestChannel extends Logging {
   }
 }
 
+trait IRequestChannel {
+
+  def metrics: RequestChannelMetrics
+
+  /** Send a request to be handled, potentially blocking until there is room in the queue for the request */
+  def sendRequest(request: RequestChannel.Request): Unit
+
+  def closeConnection(
+                       request: RequestChannel.Request,
+                       errorCounts: java.util.Map[Errors, Integer]
+                     ): Unit
+
+  def sendResponse(
+                    request: RequestChannel.Request,
+                    response: AbstractResponse,
+                    onComplete: Option[Send => Unit]
+                  ): Unit
+
+  def sendNoOpResponse(request: RequestChannel.Request): Unit
+
+  def startThrottling(request: RequestChannel.Request): Unit
+
+  def endThrottling(request: RequestChannel.Request): Unit
+
+  /** Send a response back to the socket server to be sent over the network */
+  private[network] def sendResponse(response: RequestChannel.Response): Unit
+
+  /** Get the next request or block until specified time has elapsed
+   *  Check the callback queue and execute first if present since these
+   *  requests have already waited in line. */
+  def receiveRequest(timeout: Long): RequestChannel.BaseRequest
+
+  /** Get the next request or block until there is one */
+  def receiveRequest(): RequestChannel.BaseRequest
+
+  def updateErrorMetrics(apiKey: ApiKeys, errors: collection.Map[Errors, Integer]): Unit
+
+  def clear(): Unit
+
+  def shutdown(): Unit
+
+  def sendShutdownRequest(): Unit
+
+  def sendCallbackRequest(request: RequestChannel.CallbackRequest): Unit
+}
+
 class RequestChannel(val queueSize: Int,
                      time: Time,
-                     val metrics: RequestChannelMetrics) {
+                     val metrics: RequestChannelMetrics) extends IRequestChannel {
   import RequestChannel._
 
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -504,4 +551,158 @@ class RequestChannel(val queueSize: Int,
       trace("Wakeup request could not be added to queue. This means queue is full, so we will still process callback.")
   }
 
+}
+
+class DedicatedRequestChannel(val queueSize: Int,
+                              time: Time,
+                              val metrics: RequestChannelMetrics) extends IRequestChannel {
+  import RequestChannel._
+
+  private val metricsGroup = new KafkaMetricsGroup(this.getClass)
+
+  private var processor: Processor = _
+
+  private val requestQueue = new java.util.ArrayDeque[BaseRequest](queueSize)
+  private val callbackQueue = new java.util.concurrent.ConcurrentLinkedQueue[BaseRequest]()
+  private val pendingCallbacks = new AtomicInteger(0)
+
+  metricsGroup.newGauge(RequestQueueSizeMetric, () => requestQueue.size)
+
+  metricsGroup.newGauge(ResponseQueueSizeMetric, () => {
+    if (processor == null) 0
+    else processor.responseQueueSize
+  })
+
+  def setProcessor(processor: Processor): Unit = {
+    this.processor = processor
+  }
+
+  /** Send a request to be handled. Since this is called by the same processor thread, no blocking is needed. */
+  def sendRequest(request: RequestChannel.Request): Unit = {
+    requestQueue.add(request)
+  }
+
+  def closeConnection(
+   request: RequestChannel.Request,
+   errorCounts: java.util.Map[Errors, Integer]
+  ): Unit = {
+    // This case is used when the request handler has encountered an error, but the client
+    // does not expect a response (e.g. when produce request has acks set to 0)
+    updateErrorMetrics(request.header.apiKey, errorCounts.asScala)
+    sendResponse(new RequestChannel.CloseConnectionResponse(request))
+  }
+
+  def sendResponse(
+    request: RequestChannel.Request,
+    response: AbstractResponse,
+    onComplete: Option[Send => Unit]
+  ): Unit = {
+    updateErrorMetrics(request.header.apiKey, response.errorCounts.asScala)
+    sendResponse(new RequestChannel.SendResponse(
+      request,
+      request.buildResponseSend(response),
+      request.responseNode(response),
+      onComplete
+    ))
+  }
+
+  def sendNoOpResponse(request: RequestChannel.Request): Unit = {
+    sendResponse(new network.RequestChannel.NoOpResponse(request))
+  }
+
+  def startThrottling(request: RequestChannel.Request): Unit = {
+    sendResponse(new RequestChannel.StartThrottlingResponse(request))
+  }
+
+  def endThrottling(request: RequestChannel.Request): Unit = {
+    sendResponse(new EndThrottlingResponse(request))
+  }
+
+  /** Send a response back to the socket server to be sent over the network */
+  private[network] def sendResponse(response: RequestChannel.Response): Unit = {
+    if (isTraceEnabled) {
+      val requestHeader = response.request.headerForLoggingOrThrottling()
+      val message = response match {
+        case sendResponse: SendResponse =>
+          s"Sending ${requestHeader.apiKey} response to client ${requestHeader.clientId} of ${sendResponse.responseSend.size} bytes."
+        case _: NoOpResponse =>
+          s"Not sending ${requestHeader.apiKey} response to client ${requestHeader.clientId} as it's not required."
+        case _: CloseConnectionResponse =>
+          s"Closing connection for client ${requestHeader.clientId} due to error during ${requestHeader.apiKey}."
+        case _: StartThrottlingResponse =>
+          s"Notifying channel throttling has started for client ${requestHeader.clientId} for ${requestHeader.apiKey}"
+        case _: EndThrottlingResponse =>
+          s"Notifying channel throttling has ended for client ${requestHeader.clientId} for ${requestHeader.apiKey}"
+      }
+      trace(message)
+    }
+
+    response match {
+      // We should only send one of the following per request
+      case _: SendResponse | _: NoOpResponse | _: CloseConnectionResponse =>
+        val request = response.request
+        val timeNanos = time.nanoseconds()
+        request.responseCompleteTimeNanos = timeNanos
+        if (request.apiLocalCompleteTimeNanos == -1L)
+          request.apiLocalCompleteTimeNanos = timeNanos
+        // If this callback was executed after KafkaApis returned we will need to adjust the callback completion time here.
+        if (request.callbackRequestDequeueTimeNanos.isDefined && request.callbackRequestCompleteTimeNanos.isEmpty)
+          request.callbackRequestCompleteTimeNanos = Some(time.nanoseconds())
+      // For a given request, these may happen in addition to one in the previous section, skip updating the metrics
+      case _: StartThrottlingResponse | _: EndThrottlingResponse => ()
+    }
+
+    // The processor may be null if it was shutdown. In this case, the connections
+    // are closed, so the response is dropped.
+    if (processor != null) {
+      if (processor.thread != null && Thread.currentThread == processor.thread) {
+        processor.enqueueDedicatedResponse(response)
+      } else {
+        processor.enqueueResponse(response)
+      }
+    }
+  }
+
+  /** Get the next request or block until specified time has elapsed
+   *  Check the callback queue and execute first if present since these
+   *  requests have already waited in line. */
+  def receiveRequest(timeout: Long): RequestChannel.BaseRequest = {
+    receiveRequest()
+  }
+
+  /** Get the next request or return null if none. Prioritizes callbacks. */
+  def receiveRequest(): RequestChannel.BaseRequest = {
+    if (pendingCallbacks.get() > 0) {
+      val cb = callbackQueue.poll()
+      if (cb != null) {
+        pendingCallbacks.decrementAndGet()
+        return cb
+      }
+    }
+    requestQueue.poll()
+  }
+
+  def updateErrorMetrics(apiKey: ApiKeys, errors: collection.Map[Errors, Integer]): Unit = {
+    errors.foreachEntry { (error, count) =>
+      metrics(apiKey.name).markErrorMeter(error, count)
+    }
+  }
+
+  def clear(): Unit = {
+    requestQueue.clear()
+    callbackQueue.clear()
+  }
+
+  def shutdown(): Unit = {
+    clear()
+    metrics.close()
+  }
+
+  def sendShutdownRequest(): Unit = requestQueue.add(ShutdownRequest)
+
+  def sendCallbackRequest(request: CallbackRequest): Unit = {
+    callbackQueue.add(request)
+    pendingCallbacks.incrementAndGet()
+    if (processor != null) processor.wakeup()
+  }
 }

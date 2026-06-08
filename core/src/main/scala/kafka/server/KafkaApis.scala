@@ -18,7 +18,7 @@
 package kafka.server
 
 import kafka.coordinator.transaction.{InitProducerIdResult, TransactionCoordinator}
-import kafka.network.RequestChannel
+import kafka.network.{IRequestChannel, RequestChannel}
 import kafka.server.QuotaFactory.{QuotaManagers, UNBOUNDED_QUOTA}
 import kafka.server.handlers.DescribeTopicPartitionsRequestHandler
 import kafka.server.share.{ShareFetchUtils, SharePartitionManager}
@@ -87,7 +87,7 @@ import scala.jdk.javaapi.OptionConverters
 /**
  * Logic to handle the various Kafka requests
  */
-class KafkaApis(val requestChannel: RequestChannel,
+class KafkaApis(val requestChannel: IRequestChannel,
                 val forwardingManager: ForwardingManager,
                 val replicaManager: ReplicaManager,
                 val groupCoordinator: GroupCoordinator,
@@ -4161,7 +4161,7 @@ object KafkaApis {
 }
 
 case class KafkaApisBuilder(
-  requestChannel: RequestChannel = null,
+  requestChannel: IRequestChannel = null,
   forwardingManager: ForwardingManager = null,
   replicaManager: ReplicaManager = null,
   groupCoordinator: GroupCoordinator = null,
@@ -4186,7 +4186,7 @@ case class KafkaApisBuilder(
   groupConfigManager: GroupConfigManager = null
 ) extends ApiRequestHandlerBuilder {
 
-  override def withRequestChannel(requestChannel: RequestChannel): KafkaApisBuilder = copy(requestChannel = requestChannel)
+  override def withRequestChannel(requestChannel: IRequestChannel): KafkaApisBuilder = copy(requestChannel = requestChannel)
 
   override def build(): KafkaApis = {
     if (requestChannel == null) throw new RuntimeException("you must set requestChannel")
