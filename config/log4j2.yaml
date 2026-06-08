@@ -88,10 +88,10 @@ Configuration:
           interval: 1
       # Stats per channels appender
       - name: ChannelRequestAppender
-        fileName: "${sys:kafka.logs.dir}/channel-request.log"
-        filePattern: "${sys:kafka.logs.dir}/channel-request.log.%d{yyyy-MM-dd}"
+        fileName: "${sys:kafka.logs.dir}/channel-requests.log"
+        filePattern: "${sys:kafka.logs.dir}/channel-requests.log.%d{yyyy-MM-dd}"
         PatternLayout:
-          pattern: "[%d] %p %m%n"
+          pattern: "[%d] %m%n"
         TimeBasedTriggeringPolicy:
           modulate: true
           interval: 1
@@ -169,7 +169,7 @@ Configuration:
         additivity: false
         AppenderRef:
           ref: AuthorizerAppender
-      # Stats per channels looger
+      # Stats per channels logger
       - name: channel.requests
         level: INFO
         additivity: false

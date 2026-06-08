@@ -2308,7 +2308,6 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
 
   override def run(): Unit = {
     var lastStatUpdatedNs = time.nanoseconds()
-    var tickCnt = 0
     try {
       while (shouldRun.get()) {
         try {
@@ -2321,7 +2320,6 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
           boostOneChannelIfNeeded()
           unBoostOneChannelIfNeeded()
 
-          tickCnt += 1
           if (globalReassignCooldownCounter > 0) globalReassignCooldownCounter -= 1
           sleepToNextTick(loopStartNs)
         } catch {
@@ -2381,10 +2379,8 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
           } else if (stat.isProcessedRequestsCountFullyLoaded) {
             stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
             stat.putNewIdleFlag(stat.getProcessedRequestsCountAvg < stat.returnThreshold)
-            stat.getStatLogStringIfFullyLoaded.foreach(s => debug(s"{channel: ${c.getLastClientId}, stat:$s}"))
           } else {
             stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
-            stat.getStatLogStringIfFullyLoaded.foreach(s => debug(s"{channel: ${c.getLastClientId}, stat:$s}"))
           }
         }
       }
@@ -2405,7 +2401,6 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
           } else {
             stat.putNewSaturatedFlag(loadState == KafkaChannel.ChannelLoadState.SATURATED)
             stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
-            stat.getStatLogStringIfFullyLoaded.foreach(s => debug(s"{channel: ${c.getLastClientId}, stat:$s}"))
           }
         }
       }
@@ -2429,17 +2424,13 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
     private var prevCumulativeProcessedRequestsCount: Option[Long] = None
     private var cooldownCounter: Int = cooldownTick
 
-    private var tick = processedRequestsCountWindowSize
-
     def isFullySaturated: Boolean = saturatedFlagWindow.sum >= saturatedChannelDetectionWindowSize
     def putNewSaturatedFlag(newFlag: Boolean): Unit = saturatedFlagWindow.put(if (newFlag) 1 else 0)
-
 
     def getProcessedRequestsCountAvg: Double = processedRequestsCountWindow.avg
     def putNewCumulativeProcessedRequestsCount(newCPR: Long, elapsedMs: Long): Unit = {
       prevCumulativeProcessedRequestsCount.foreach(prev => processedRequestsCountWindow.put(newCPR - prev, elapsedMs))
       prevCumulativeProcessedRequestsCount = Some(newCPR)
-      tick += 1
     }
     def updatePrevCumulativeProcessedRequestsCountOnly(newCPR: Long): Unit = prevCumulativeProcessedRequestsCount = Some(newCPR)
 
@@ -2449,12 +2440,6 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
         return true
       }
       false
-    }
-
-    def getStatLogStringIfFullyLoaded: Option[String] = {
-      if (tick < processedRequestsCountWindowSize) return None
-      tick = 0
-      Some(toString)
     }
 
     override def toString: String = {
@@ -2478,8 +2463,6 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
     private var prevCumulativeProcessedRequestsCount: Option[Long] = None
     private var cooldownCounter: Int = cooldownTick
 
-    private var tick: Int = processedRequestsCountWindowSize
-
     def isFullyIdle: Boolean = idleFlagWindow.sum >= idleChannelDetectionWindowSize
     def putNewIdleFlag(newFlag: Boolean): Unit = idleFlagWindow.put(if (newFlag) 1 else 0)
 
@@ -2488,7 +2471,6 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
     def putNewCumulativeProcessedRequestsCount(newCPR: Long, elapsedMs: Long): Unit = {
       prevCumulativeProcessedRequestsCount.foreach(prev => processedRequestsCountWindow.put(newCPR - prev, elapsedMs))
       prevCumulativeProcessedRequestsCount = Some(newCPR)
-      tick += 1
     }
     def updatePrevCumulativeProcessedRequestsCountOnly(newCPR: Long): Unit = prevCumulativeProcessedRequestsCount = Some(newCPR)
 
@@ -2498,12 +2480,6 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
         return true
       }
       false
-    }
-
-    def getStatLogStringIfFullyLoaded: Option[String] = {
-      if (tick < processedRequestsCountWindowSize) return None
-      tick = 0
-      Some(toString)
     }
 
     override def toString: String = {
