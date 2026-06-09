@@ -1141,7 +1141,7 @@ private[kafka] class Processor(
   // non-negative incrementing value that ensures that even if remotePort is reused after a connection is
   // closed, connection ids are not reused while requests from the closed connection are being processed.
   private var nextConnectionIndex = 0
-  private val lastCycleUnmutedChannels = new mutable.LinkedHashSet[KafkaChannel]()
+  private val lastCycleUnmutedChannels = mutable.Set[KafkaChannel]()
 
   override def run(): Unit = {
     try {
@@ -2237,8 +2237,8 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
   private val dedicatedProcessors = new ArrayBuffer[DedicatedProcessor]()
   private val idleDedicatedProcessors = new mutable.LinkedHashSet[Processor]()
 
-  private val normalChannelStats = new mutable.LinkedHashMap[KafkaChannel, NormalChannelStats]()
-  private val boostedChannelStats = new mutable.LinkedHashMap[KafkaChannel, BoostedChannelStats]()
+  private val normalChannelStats = mutable.Map[KafkaChannel, NormalChannelStats]()
+  private val boostedChannelStats = mutable.Map[KafkaChannel, BoostedChannelStats]()
 
   private var globalReassignCooldownCounter = 0
 
