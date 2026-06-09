@@ -12,9 +12,11 @@ trait IProcessorInterceptorBuilder {
 trait IProcessorInterceptor extends ISelectorInterceptor {
   def init(): Unit
 
-  def beforeEveryProcessorCycle(processor: Processor): Unit
+  def beforeEveryProcessorCycle(): Unit
 
-  def beforeRegisterNewChannel(channel: SocketChannel, processor: Processor): Unit
+  def beforeRegisterNewChannel(channel: SocketChannel): Unit
+
+  def beforeReregisterNewChannel(channel: KafkaChannel): Unit
 
   def beforeSendRequestToQueue(request: RequestChannel.Request): Unit
 
@@ -33,12 +35,16 @@ class ProcessorInterceptors(val interceptors: Vector[IProcessorInterceptor]) ext
     interceptors.foreach(_.init())
   }
 
-  def beforeEveryProcessorCycle(processor: Processor): Unit = {
-    interceptors.foreach(_.beforeEveryProcessorCycle(processor))
+  def beforeEveryProcessorCycle(): Unit = {
+    interceptors.foreach(_.beforeEveryProcessorCycle())
   }
 
-  def beforeRegisterNewChannel(channel: SocketChannel, processor: Processor): Unit = {
-    interceptors.foreach(_.beforeRegisterNewChannel(channel, processor))
+  def beforeRegisterNewChannel(channel: SocketChannel): Unit = {
+    interceptors.foreach(_.beforeRegisterNewChannel(channel))
+  }
+
+  def beforeReregisterNewChannel(channel: KafkaChannel): Unit = {
+    interceptors.foreach(_.beforeReregisterNewChannel(channel))
   }
 
   override def beforePutCompletedReceive(channel: KafkaChannel, currentTimeMs: Long): Unit = {

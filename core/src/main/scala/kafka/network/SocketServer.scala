@@ -1042,7 +1042,7 @@ private[kafka] class Processor(
   threadName: String,
   connectionDisconnectListeners: Seq[ConnectionDisconnectListener],
   maybeClientBoostManager: Option[ClientBoostManager],
-  maybeRequestHandlerBuilder: Option[ApiRequestHandlerBuilder],
+  val maybeRequestHandlerBuilder: Option[ApiRequestHandlerBuilder],
   interceptorBuilders: Vector[IProcessorInterceptorBuilder]
 ) extends Runnable with Logging {
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -1148,7 +1148,7 @@ private[kafka] class Processor(
       while (shouldRun.get()) {
         try {
           // setup any new connections that have been queued up
-          interceptors.beforeEveryProcessorCycle(this)
+          interceptors.beforeEveryProcessorCycle()
           configureNewConnections()
           configureReConnections()
           // register any new responses for writing
@@ -1544,7 +1544,7 @@ private[kafka] class Processor(
       val channel = newConnections.poll()
       try {
         debug(s"Processor $id listening to new connection from ${channel.socket.getRemoteSocketAddress}")
-        interceptors.beforeRegisterNewChannel(channel, this)
+        interceptors.beforeRegisterNewChannel(channel)
         selector.register(connectionId(channel.socket), channel)
         connectionsProcessed += 1
       } catch {
@@ -1586,6 +1586,7 @@ private[kafka] class Processor(
       val (channel, request) = incomingReassignments.poll()
       try {
         info(s"Connection ${channel.id} reassigned to Processor $id")
+        interceptors.beforeReregisterNewChannel(channel)
         selector.reregister(channel)
         reassignedRequests.put(channel.id, request)
         selector.mute(channel.id)
