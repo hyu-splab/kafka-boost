@@ -1366,10 +1366,10 @@ private[kafka] class Processor(
                       apiVersionsRequest.data.clientSoftwareName,
                       apiVersionsRequest.data.clientSoftwareVersion))
                   }
+                  maybeClientBoostManager
+                    .flatMap(_.getOrCreateDedicatedProcessorIfNeeded(req.header.clientId))
+                    .foreach(destProcessor => reserveReassign(channel, destProcessor))
                 }
-                maybeClientBoostManager
-                  .flatMap(_.getOrCreateDedicatedProcessorIfNeeded(req.header.clientId))
-                  .foreach(destProcessor => reserveReassign(channel, destProcessor))
                 if (!reassignChannelIfNeeded(channel, req)) {
                   interceptors.beforeSendRequestToQueue(req)
                   requestChannel.sendRequest(req)
