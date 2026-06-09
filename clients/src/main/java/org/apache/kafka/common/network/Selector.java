@@ -107,6 +107,7 @@ public class Selector implements Selectable, AutoCloseable {
     private final Logger log;
     private final java.nio.channels.Selector nioSelector;
     private final Map<String, KafkaChannel> channels;
+    private final Set<KafkaChannel> lastPolledChannels;
     private final Set<KafkaChannel> explicitlyMutedChannels;
     private boolean outOfMemory;
     private final List<NetworkSend> completedSends;
@@ -169,6 +170,7 @@ public class Selector implements Selectable, AutoCloseable {
         this.maxReceiveSize = maxReceiveSize;
         this.time = time;
         this.channels = new HashMap<>();
+        this.lastPolledChannels = new HashSet<>();
         this.explicitlyMutedChannels = new HashSet<>();
         this.outOfMemory = false;
         this.completedSends = new ArrayList<>();
@@ -608,6 +610,7 @@ public class Selector implements Selectable, AutoCloseable {
                            long currentTimeNanos) {
         for (SelectionKey key : determineHandlingOrder(selectionKeys)) {
             KafkaChannel channel = channel(key);
+            lastPolledChannels.add(channel);
             long channelStartTimeNanos = recordTimePerConnection ? time.nanoseconds() : 0;
             boolean sendFailed = false;
             String nodeId = channel.id();
@@ -955,6 +958,7 @@ public class Selector implements Selectable, AutoCloseable {
             this.disconnected.put(channel, ChannelState.FAILED_SEND);
         this.failedSends.clear();
         this.madeReadProgressLastPoll = false;
+        this.lastPolledChannels.clear();
     }
 
     /**
@@ -1098,6 +1102,10 @@ public class Selector implements Selectable, AutoCloseable {
      */
     public KafkaChannel channel(String id) {
         return this.channels.get(id);
+    }
+
+    public boolean isLastPolledChannel(KafkaChannel channel) {
+        return this.lastPolledChannels.contains(channel);
     }
 
     /**

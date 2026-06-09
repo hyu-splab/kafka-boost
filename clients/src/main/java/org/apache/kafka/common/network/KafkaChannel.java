@@ -185,6 +185,10 @@ public class KafkaChannel implements AutoCloseable {
         this.loadState.set(ChannelLoadState.IDLE);
     }
 
+    public ChannelLoadState getLoadState() {
+        return loadState.get();
+    }
+
     public ChannelLoadState getLoadStateAndReset() {
         return this.loadState.getAndSet(ChannelLoadState.INIT);
     }

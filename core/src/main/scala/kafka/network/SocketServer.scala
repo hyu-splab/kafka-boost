@@ -38,7 +38,7 @@ import org.apache.kafka.common.internals.FatalExitError
 import org.apache.kafka.common.memory.{MemoryPool, SimpleMemoryPool}
 import org.apache.kafka.common.metrics._
 import org.apache.kafka.common.metrics.stats.{Avg, CumulativeSum, Meter, Rate}
-import org.apache.kafka.common.network.KafkaChannel.ChannelMuteEvent
+import org.apache.kafka.common.network.KafkaChannel.{ChannelLoadState, ChannelMuteEvent}
 import org.apache.kafka.common.network.{ChannelBuilder, ChannelBuilders, ClientInformation, KafkaChannel, ListenerName, ListenerReconfigurable, NetworkSend, Selectable, Send, ServerConnectionId, Selector => KSelector}
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.requests.{ApiVersionsRequest, RequestContext, RequestHeader}
@@ -1140,7 +1140,7 @@ private[kafka] class Processor(
   // non-negative incrementing value that ensures that even if remotePort is reused after a connection is
   // closed, connection ids are not reused while requests from the closed connection are being processed.
   private var nextConnectionIndex = 0
-  private val lastCycleUnmutedChannels = new java.util.ArrayList[KafkaChannel]()
+  private val lastCycleUnmutedChannels = new mutable.LinkedHashSet[KafkaChannel]()
 
   override def run(): Unit = {
     try {
@@ -1176,17 +1176,18 @@ private[kafka] class Processor(
     }
   }
 
-  private def addLastCycleUnmutedChannels(channelId: String): Unit =
-    openOrClosingChannel(channelId).filter(!_.isMuted).foreach(c => {
-      if (!lastCycleUnmutedChannels.contains(c)) {
-        lastCycleUnmutedChannels.add(c)
-      }
-      c.markIdle()
-    })
+  private def addLastCycleUnmutedChannels(channelId: String): Unit = {
+    openOrClosingChannel(channelId)
+      .filter(c => !c.isMuted && !lastCycleUnmutedChannels.contains(c))
+      .foreach(c => lastCycleUnmutedChannels.add(c))
+  }
 
   private def clearLastCycleUnmutedChannels(): Unit = {
-    for (i <- 0 until lastCycleUnmutedChannels.size()) {
-      lastCycleUnmutedChannels.get(i).markIdle()
+    lastCycleUnmutedChannels.foreach { c =>
+      if (c.getLoadState != ChannelLoadState.IDLE) {
+        if (selector.isLastPolledChannel(c)) c.markSaturated()
+        else c.markIdle()
+      }
     }
     lastCycleUnmutedChannels.clear()
   }
@@ -1351,8 +1352,9 @@ private[kafka] class Processor(
                   startTimeNanos = nowNanos, memoryPool, receive.payload, requestChannel.metrics, None)
                 channel.setLastClientId(req.header.clientId)
                 if (req.header.apiKey() == ApiKeys.PRODUCE) {
-                  if (lastCycleUnmutedChannels.remove(channel)) channel.markSaturated()
-                  else channel.markIdle()
+                  if (lastCycleUnmutedChannels.remove(channel) && channel.getLoadState == ChannelLoadState.INIT) {
+                    channel.markSaturated()
+                  }
                 }
 
                 // KIP-511: ApiVersionsRequest is intercepted here to catch the client software name
@@ -2336,6 +2338,7 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
   }
 
   private def unBoostOneChannelIfNeeded(): Unit = {
+    if (globalReassignCooldownCounter > 0) return
     boostedChannelStats.filter { case (channel, stat) =>
       !channel.isMigrating && stat.isFullyIdle
     }.minByOption { case (_, stat) =>
@@ -2344,68 +2347,71 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
       stat.processor.reserveReassign(channel, stat.originProcessor)
       idleDedicatedProcessors += stat.processor
       globalReassignCooldownCounter = globalReassignCooldownTicks
-      normalChannelStats.put(channel, new NormalChannelStats(stat.originProcessor, 0))
+      normalChannelStats.put(channel, new NormalChannelStats(stat.originProcessor, channelReassignCooldownTicks))
     }
   }
 
   private def boostOneChannelIfNeeded(): Unit = {
+    if (globalReassignCooldownCounter > 0 || idleDedicatedProcessors.isEmpty) return
     normalChannelStats.filter { case (channel, stat) =>
-      !channel.isMigrating && stat.isFullySaturated && globalReassignCooldownCounter <= 0
+      !channel.isMigrating && stat.isFullySaturated
     }.maxByOption { case (_, stat) =>
       stat.getProcessedRequestsCountAvg
     }.foreach { case (channel, stat) =>
-      val destProcessor = idleDedicatedProcessors.headOption
-      destProcessor.foreach(p => {
-        stat.processor.reserveReassign(channel, p)
+      idleDedicatedProcessors.headOption.foreach { destProcessor =>
+        stat.processor.reserveReassign(channel, destProcessor)
         boostedChannelStats.put(channel, new BoostedChannelStats(
-          p,
+          destProcessor,
           stat.processor,
           stat.getProcessedRequestsCountAvg.toLong,
           channelReassignCooldownTicks
         ))
-        idleDedicatedProcessors.remove(p)
-      })
+        idleDedicatedProcessors.remove(destProcessor)
+        globalReassignCooldownCounter = globalReassignCooldownTicks
+      }
     }
   }
 
   private def updateBoostedChannelStats(elapsedNs: Long): Unit = {
-    val activeChannels = mutable.Set[KafkaChannel]()
+    val elapsedMs = elapsedNs / 1_000_000
     dedicatedProcessors.foreach { p =>
       p.processor.forEachChannels { c =>
-        activeChannels.add(c)
         boostedChannelStats.get(c).foreach { stat =>
+          stat.resetNeedRemoved()
           if (stat.decrementCooldownCounterIfNeeded()) {
             stat.updatePrevCumulativeProcessedRequestsCountOnly(c.getCumulativeProcessedRequests)
           } else if (stat.isProcessedRequestsCountFullyLoaded) {
-            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
+            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedMs)
             stat.putNewIdleFlag(stat.getProcessedRequestsCountAvg < stat.returnThreshold)
           } else {
-            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
+            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedMs)
           }
         }
       }
     }
-    boostedChannelStats.filterInPlace((c, _) => activeChannels.contains(c) || c.isMigrating)
+    boostedChannelStats.filterInPlace((channel, stat) => channel.isMigrating || !stat.doesNeedRemoved())
+    boostedChannelStats.foreach(_._2.setNeedRemoved())
   }
 
   private def updateNormalChannelStats(elapsedNs: Long): Unit = {
-    val activeChannels = mutable.Set[KafkaChannel]()
+    val elapsedMs = elapsedNs / 1_000_000
     networkProcessors.foreach { p =>
       p.forEachChannels { c =>
-        activeChannels.add(c)
         val loadState = c.getLoadStateAndReset
         if (loadState != KafkaChannel.ChannelLoadState.INIT) normalChannelStats.getOrElseUpdate(c, new NormalChannelStats(p, newChannelCooldownTicks))
         normalChannelStats.get(c).foreach { stat =>
+          stat.resetNeedRemoved()
           if (stat.decrementCooldownCounterIfNeeded()) {
             stat.updatePrevCumulativeProcessedRequestsCountOnly(c.getCumulativeProcessedRequests)
           } else {
             stat.putNewSaturatedFlag(loadState == KafkaChannel.ChannelLoadState.SATURATED)
-            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedNs / 1_000_000)
+            stat.putNewCumulativeProcessedRequestsCount(c.getCumulativeProcessedRequests, elapsedMs)
           }
         }
       }
     }
-    normalChannelStats.filterInPlace((c, _) => activeChannels.contains(c) || c.isMigrating)
+    normalChannelStats.filterInPlace((channel, stat) => channel.isMigrating || !stat.doesNeedRemoved())
+    normalChannelStats.foreach(_._2.setNeedRemoved())
   }
 
   private def sleepToNextTick(startNs: Long): Unit = {
@@ -2423,6 +2429,7 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
     private val processedRequestsCountWindow = new CircularStatWindow(processedRequestsCountWindowSize)
     private var prevCumulativeProcessedRequestsCount: Option[Long] = None
     private var cooldownCounter: Int = cooldownTick
+    private var needRemoved = false
 
     def isFullySaturated: Boolean = saturatedFlagWindow.sum >= saturatedChannelDetectionWindowSize
     def putNewSaturatedFlag(newFlag: Boolean): Unit = saturatedFlagWindow.put(if (newFlag) 1 else 0)
@@ -2441,6 +2448,10 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
       }
       false
     }
+
+    def doesNeedRemoved(): Boolean = needRemoved
+    def setNeedRemoved(): Unit = needRemoved = true
+    def resetNeedRemoved(): Unit = needRemoved = false
 
     override def toString: String = {
       s"{" +
@@ -2462,6 +2473,7 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
     private val processedRequestsCountWindow = new CircularStatWindow(processedRequestsCountWindowSize)
     private var prevCumulativeProcessedRequestsCount: Option[Long] = None
     private var cooldownCounter: Int = cooldownTick
+    private var needRemoved = false
 
     def isFullyIdle: Boolean = idleFlagWindow.sum >= idleChannelDetectionWindowSize
     def putNewIdleFlag(newFlag: Boolean): Unit = idleFlagWindow.put(if (newFlag) 1 else 0)
@@ -2481,6 +2493,10 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
       }
       false
     }
+
+    def doesNeedRemoved(): Boolean = needRemoved
+    def setNeedRemoved(): Unit = needRemoved = true
+    def resetNeedRemoved(): Unit = needRemoved = false
 
     override def toString: String = {
       s"{" +
