@@ -1056,9 +1056,10 @@ private[kafka] class Processor(
 
   private val newConnections = new ArrayBlockingQueue[SocketChannel](connectionQueueSize)
   private val incomingReassignments = new ArrayBlockingQueue[(KafkaChannel, RequestChannel.Request)](connectionQueueSize)
-  private val reassignedRequests = new ConcurrentHashMap[String, RequestChannel.Request]()
+  private val reassignedRequests = mutable.Map[String, RequestChannel.Request]()
 
   private val outgoingReassignmentsMap = new ConcurrentHashMap[String, Processor]()
+  private val pendingOutgoingReassignments = new AtomicInteger(0)
 
   private val inflightResponses = mutable.Map[String, RequestChannel.Response]()
   private val responseQueue = new LinkedBlockingDeque[RequestChannel.Response]()
@@ -1296,6 +1297,9 @@ private[kafka] class Processor(
   }
 
   private def reassignChannelIfNeeded(channel: KafkaChannel, request: RequestChannel.Request): Boolean = {
+    if (pendingOutgoingReassignments.get() <= 0) return false
+    if (!outgoingReassignmentsMap.containsKey(channel.id)) return false
+
     var reassigned: Boolean = false
     outgoingReassignmentsMap.computeIfPresent(channel.id, (_, destProcessor) => {
       info(s"register ${channel.getLastClientId} channel to target Processor ${destProcessor.id}")
@@ -1305,26 +1309,27 @@ private[kafka] class Processor(
       reassigned = true
       null
     })
+    if (reassigned) pendingOutgoingReassignments.decrementAndGet()
     reassigned
   }
 
   private def processCompletedReceives(): Unit = {
-    reassignedRequests.forEach { (channelId, request) =>
-      try {
-        if (openOrClosingChannel(channelId).isDefined) {
-          info(s"process reassigned requests from channel $channelId")
-          requestChannel.sendRequest(request)
-          reassignedRequests.remove(channelId)
-        } else {
-          val req = reassignedRequests.remove(channelId)
-          if (req != null) req.releaseBuffer()
+    if (reassignedRequests.nonEmpty) {
+      reassignedRequests.foreach { case (channelId, request) =>
+        try {
+          if (openOrClosingChannel(channelId).isDefined) {
+            info(s"process reassigned requests from channel $channelId")
+            requestChannel.sendRequest(request)
+          } else {
+            request.releaseBuffer()
+          }
+        } catch {
+          case e: Throwable =>
+            request.releaseBuffer()
+            processChannelException(channelId, s"Exception while processing request from $channelId", e)
         }
-      } catch {
-        case e: Throwable =>
-          val req = reassignedRequests.remove(channelId)
-          if (req != null) req.releaseBuffer()
-          processChannelException(channelId, s"Exception while processing request from $channelId", e)
       }
+      reassignedRequests.clear()
     }
 
     selector.completedReceives.forEach { receive =>
@@ -1438,8 +1443,8 @@ private[kafka] class Processor(
         inflightResponses.remove(connectionId).foreach(updateRequestMetrics)
 
         removeReassignedChannel(connectionId)
-        Option(reassignedRequests.remove(connectionId)).foreach(_.releaseBuffer())
-        outgoingReassignmentsMap.remove(connectionId)
+        reassignedRequests.remove(connectionId).foreach(_.releaseBuffer())
+        if (outgoingReassignmentsMap.remove(connectionId) != null) pendingOutgoingReassignments.decrementAndGet()
         // the channel has been closed by the selector but the quotas still need to be updated
         connectionQuotas.dec(listenerName, InetAddress.getByName(remoteHost))
         // Call listeners to notify for closed connection.
@@ -1479,8 +1484,8 @@ private[kafka] class Processor(
     }
 
     removeReassignedChannel(connectionId)
-    Option(reassignedRequests.remove(connectionId)).foreach(_.releaseBuffer())
-    outgoingReassignmentsMap.remove(connectionId)
+    reassignedRequests.remove(connectionId).foreach(_.releaseBuffer())
+    if (outgoingReassignmentsMap.remove(connectionId) != null) pendingOutgoingReassignments.decrementAndGet()
   }
 
   private def removeReassignedChannel(connectionId: String): Unit = {
@@ -1497,10 +1502,12 @@ private[kafka] class Processor(
   def forEachChannels(f: KafkaChannel => Unit): Unit = {
     selector.channels().forEach(f(_))
 
-    val iter = incomingReassignments.iterator()
-    while (iter.hasNext) {
-      val (channel, _) = iter.next()
-      f(channel)
+    if (!incomingReassignments.isEmpty) {
+      val iter = incomingReassignments.iterator()
+      while (iter.hasNext) {
+        val entry = iter.next()
+        f(entry._1)
+      }
     }
   }
 
@@ -1552,7 +1559,7 @@ private[kafka] class Processor(
   }
 
   def reserveReassign(channel: KafkaChannel, destProcessor: Processor): Unit = {
-    outgoingReassignmentsMap.putIfAbsent(channel.id(), destProcessor)
+    if (outgoingReassignmentsMap.putIfAbsent(channel.id(), destProcessor) == null) pendingOutgoingReassignments.incrementAndGet()
     channel.setMigrating(true)
     wakeup()
   }
