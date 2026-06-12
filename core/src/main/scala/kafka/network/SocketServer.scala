@@ -1577,10 +1577,15 @@ private[kafka] class Processor(
    * The channel will be added to the selector during the next `configureReConnections` call.
    */
   def register(kafkaChannel: KafkaChannel, req: RequestChannel.Request): Boolean = {
-    req.setProcessor(this.id)
-    incomingReassignments.put((kafkaChannel, req))
-    wakeup()
-    true
+    if (shouldRun.get()) {
+      req.setProcessor(this.id)
+      incomingReassignments.put((kafkaChannel, req))
+      wakeup()
+      true
+    } else {
+      req.releaseBuffer()
+      false
+    }
   }
 
   /**
@@ -2251,6 +2256,9 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
 
   private var globalReassignCooldownCounter = 0
 
+  private val needReset: AtomicBoolean = new AtomicBoolean()
+  private var newDedicatedProcessorCnt: Option[Int] = None
+
   val shouldRun: AtomicBoolean = new AtomicBoolean(true)
   private val started: AtomicBoolean = new AtomicBoolean()
 
@@ -2269,7 +2277,8 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
       if (toRemove.exists(_.id == networkProcessors(idx).id)) targets.push(idx)
     }
     while (targets.nonEmpty) networkProcessors.remove(targets.pop())
-    // TODO: Channels originating from these processors must be closed or migrated to a different network thread.
+    newDedicatedProcessorCnt = None
+    needReset.set(true)
   }
 
   def dedicatedProcessorsCount: Int = dedicatedProcessors.size
@@ -2280,18 +2289,8 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
   }
 
   def removeDedicatedProcessors(count: Int): Unit = {
-    val toRemove = dedicatedProcessors.takeRight(count)
-    dedicatedProcessors.remove(dedicatedProcessors.size - count, count)
-    toRemove.foreach { dedicatedProcessor =>
-      if (!idleDedicatedProcessors.remove(dedicatedProcessor.processor)) {
-        // TODO: Add exception handling for removal using already assigned processor or logic to migrate all channels to the network thread.
-      }
-      dedicatedProcessor.close()
-    }
-  }
-
-  def unBoostAllChannels(): Unit = {
-    // TODO: Migrate all channels to the network thread.
+    newDedicatedProcessorCnt = Some(count)
+    needReset.set(true)
   }
 
   def setApiRequestHandler(apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]): Unit = {
@@ -2337,6 +2336,7 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
           updateBoostedChannelStats(elapsedNs)
           boostOneChannelIfNeeded()
           unBoostOneChannelIfNeeded()
+          resetIfNeeded()
 
           if (globalReassignCooldownCounter > 0) globalReassignCooldownCounter -= 1
           sleepToNextTick(loopStartNs)
@@ -2351,6 +2351,28 @@ class DynamicChannelBoostManager(val endPoint: Endpoint,
     } finally {
       closeAll()
     }
+  }
+
+  private def resetIfNeeded(): Unit = {
+    if (!needReset.get) return
+    normalChannelStats.clear()
+    boostedChannelStats.foreach { case (channel, stat) =>
+      stat.processor.reserveReassign(channel, stat.originProcessor)
+      idleDedicatedProcessors += stat.processor
+    }
+    boostedChannelStats.clear()
+
+    newDedicatedProcessorCnt.foreach { count =>
+      val toRemove = dedicatedProcessors.takeRight(count)
+      dedicatedProcessors.remove(dedicatedProcessors.size - count, count)
+      toRemove.foreach { dedicatedProcessor =>
+        idleDedicatedProcessors.remove(dedicatedProcessor.processor)
+        dedicatedProcessor.close()
+      }
+    }
+
+    globalReassignCooldownCounter = globalReassignCooldownTicks
+    needReset.set(false)
   }
 
   private def unBoostOneChannelIfNeeded(): Unit = {
