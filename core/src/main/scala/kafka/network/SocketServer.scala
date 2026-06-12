@@ -396,17 +396,22 @@ private[network] class ClientBoostManager(listenerName: ListenerName,
 
   private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
 
-  private var spareDedicatedProcessor: Option[DedicatedProcessor] = None
+  private val spareDedicatedProcessor: AtomicReference[DedicatedProcessor] = new AtomicReference[DedicatedProcessor](null)
   private val dedicatedProcessorsByClientId = new ConcurrentHashMap[String, DedicatedProcessor]()
 
   def registerClientBoost(clientId: String): Unit = {
     dedicatedProcessorsByClientId.computeIfAbsent(clientId, _ => {
-      if (spareDedicatedProcessor.isEmpty) spareDedicatedProcessor = Some(newDedicatedProcessor())
-      val newDP = spareDedicatedProcessor.get
-      spareDedicatedProcessor = Some(newDedicatedProcessor())
+      var newDP = spareDedicatedProcessor.getAndSet(null)
+      if (newDP == null) newDP = newDedicatedProcessor()
       newDP.processor.start()
       newDP
     })
+  }
+
+  // This method is not thread safe. Call this only on the same thread.
+  def fillSpareDedicatedProcessorIfNeeded(): Unit = {
+    val prevSpareProcessor = spareDedicatedProcessor.get()
+    if (prevSpareProcessor == null) spareDedicatedProcessor.set(newDedicatedProcessor())
   }
 
   def unregisterClientBoost(clientId: String): Unit = {
@@ -740,6 +745,7 @@ private[kafka] abstract class Acceptor(val socketServer: SocketServer,
         try {
           acceptNewConnections()
           closeThrottledConnections()
+          clientBoostManager.fillSpareDedicatedProcessorIfNeeded()
         }
         catch {
           // We catch all the throwables to prevent the acceptor thread from exiting on exceptions due
