@@ -164,9 +164,11 @@ import org.apache.kafka.common.message.ListGroupsRequestData;
 import org.apache.kafka.common.message.ListGroupsResponseData;
 import org.apache.kafka.common.message.ListPartitionReassignmentsRequestData;
 import org.apache.kafka.common.message.MetadataRequestData;
+import org.apache.kafka.common.message.RegisterClientBoostRequestData;
 import org.apache.kafka.common.message.RemoveRaftVoterRequestData;
 import org.apache.kafka.common.message.RenewDelegationTokenRequestData;
 import org.apache.kafka.common.message.UnregisterBrokerRequestData;
+import org.apache.kafka.common.message.UnregisterClientBoostRequestData;
 import org.apache.kafka.common.message.UpdateFeaturesRequestData;
 import org.apache.kafka.common.message.UpdateFeaturesResponseData.UpdatableFeatureResult;
 import org.apache.kafka.common.metrics.KafkaMetric;
@@ -242,12 +244,16 @@ import org.apache.kafka.common.requests.ListPartitionReassignmentsRequest;
 import org.apache.kafka.common.requests.ListPartitionReassignmentsResponse;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
+import org.apache.kafka.common.requests.RegisterClientBoostRequest;
+import org.apache.kafka.common.requests.RegisterClientBoostResponse;
 import org.apache.kafka.common.requests.RemoveRaftVoterRequest;
 import org.apache.kafka.common.requests.RemoveRaftVoterResponse;
 import org.apache.kafka.common.requests.RenewDelegationTokenRequest;
 import org.apache.kafka.common.requests.RenewDelegationTokenResponse;
 import org.apache.kafka.common.requests.UnregisterBrokerRequest;
 import org.apache.kafka.common.requests.UnregisterBrokerResponse;
+import org.apache.kafka.common.requests.UnregisterClientBoostRequest;
+import org.apache.kafka.common.requests.UnregisterClientBoostResponse;
 import org.apache.kafka.common.requests.UpdateFeaturesRequest;
 import org.apache.kafka.common.requests.UpdateFeaturesResponse;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
@@ -5070,6 +5076,78 @@ public class KafkaAdminClient extends AdminClient {
 
         clientInstanceId = ClientTelemetryUtils.fetchClientInstanceId(clientTelemetryReporter.get(), timeout);
         return clientInstanceId;
+    }
+
+    @Override
+    public RegisterClientBoostResult registerClientBoost(String clientId, RegisterClientBoostOptions options) {
+        NodeProvider provider = new ControllerNodeProvider();
+
+        final KafkaFutureImpl<Void> future = new KafkaFutureImpl<>();
+        final long now = time.milliseconds();
+        final Call call = new Call("registerClientBoost", calcDeadlineMs(now, options.timeoutMs()), provider) {
+            @Override
+            RegisterClientBoostRequest.Builder createRequest(int timeoutMs) {
+                return new RegisterClientBoostRequest.Builder(
+                    new RegisterClientBoostRequestData()
+                        .setClientId(clientId));
+            }
+
+            @Override
+            void handleResponse(AbstractResponse abstractResponse) {
+                RegisterClientBoostResponse response = (RegisterClientBoostResponse) abstractResponse;
+                short errorCode = response.data().errorCode();
+
+                if (errorCode == Errors.NONE.code()) {
+                    future.complete(null);
+                } else {
+                    future.completeExceptionally(Errors.forCode(errorCode).exception());
+                }
+            }
+
+            @Override
+            void handleFailure(Throwable throwable) {
+                future.completeExceptionally(throwable);
+            }
+        };
+
+        runnable.call(call, now);
+        return new RegisterClientBoostResult(future);
+    }
+
+    @Override
+    public UnregisterClientBoostResult unregisterClientBoost(String clientId, UnregisterClientBoostOptions options) {
+        NodeProvider provider = new ControllerNodeProvider();
+
+        final KafkaFutureImpl<Void> future = new KafkaFutureImpl<>();
+        final long now = time.milliseconds();
+        final Call call = new Call("unregisterClientBoost", calcDeadlineMs(now, options.timeoutMs()), provider) {
+            @Override
+            UnregisterClientBoostRequest.Builder createRequest(int timeoutMs) {
+                return new UnregisterClientBoostRequest.Builder(
+                    new UnregisterClientBoostRequestData()
+                        .setClientId(clientId));
+            }
+
+            @Override
+            void handleResponse(AbstractResponse abstractResponse) {
+                UnregisterClientBoostResponse response = (UnregisterClientBoostResponse) abstractResponse;
+                short errorCode = response.data().errorCode();
+
+                if (errorCode == Errors.NONE.code()) {
+                    future.complete(null);
+                } else {
+                    future.completeExceptionally(Errors.forCode(errorCode).exception());
+                }
+            }
+
+            @Override
+            void handleFailure(Throwable throwable) {
+                future.completeExceptionally(throwable);
+            }
+        };
+
+        runnable.call(call, now);
+        return new UnregisterClientBoostResult(future);
     }
 
     private <K, V> void invokeDriver(

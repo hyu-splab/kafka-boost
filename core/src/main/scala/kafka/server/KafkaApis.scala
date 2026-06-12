@@ -245,6 +245,8 @@ class KafkaApis(val requestChannel: IRequestChannel,
         case ApiKeys.DELETE_SHARE_GROUP_OFFSETS => handleDeleteShareGroupOffsetsRequest(request).exceptionally(handleError)
         case ApiKeys.STREAMS_GROUP_DESCRIBE => handleStreamsGroupDescribe(request).exceptionally(handleError)
         case ApiKeys.STREAMS_GROUP_HEARTBEAT => handleStreamsGroupHeartbeat(request).exceptionally(handleError)
+        case ApiKeys.REGISTER_CLIENT_BOOST => forwardToController(request)
+        case ApiKeys.UNREGISTER_CLIENT_BOOST => forwardToController(request)
         case _ => throw new IllegalStateException(s"No handler for request api key ${request.header.apiKey}")
       }
     } catch {

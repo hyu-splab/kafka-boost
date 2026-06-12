@@ -41,7 +41,7 @@ import org.apache.kafka.common.metrics.stats.{Avg, CumulativeSum, Meter, Rate}
 import org.apache.kafka.common.network.KafkaChannel.{ChannelLoadState, ChannelMuteEvent}
 import org.apache.kafka.common.network.{ChannelBuilder, ChannelBuilders, ClientInformation, KafkaChannel, ListenerName, ListenerReconfigurable, NetworkSend, Selectable, Send, ServerConnectionId, Selector => KSelector}
 import org.apache.kafka.common.protocol.ApiKeys
-import org.apache.kafka.common.requests.{ApiVersionsRequest, RequestContext, RequestHeader}
+import org.apache.kafka.common.requests.{ApiVersionsRequest, RegisterClientBoostRequest, RequestContext, RequestHeader, UnregisterClientBoostRequest}
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.{Exit, KafkaThread, LogContext, Time, Utils}
 import org.apache.kafka.common.{Endpoint, KafkaException, MetricName, Reconfigurable}
@@ -1240,6 +1240,14 @@ private[kafka] class Processor(
 
           case response: SendResponse =>
             newResponseAdded = true
+            if (response.request.header.apiKey() == ApiKeys.REGISTER_CLIENT_BOOST) {
+              val registerClientBoostRequest = response.request.body[RegisterClientBoostRequest]
+              maybeClientBoostManager.foreach(_.registerClientBoost(registerClientBoostRequest.data().clientId()))
+            }
+            if (response.request.header.apiKey() == ApiKeys.UNREGISTER_CLIENT_BOOST) {
+              val unregisterClientBoostRequest = response.request.body[UnregisterClientBoostRequest]
+              maybeClientBoostManager.foreach(_.unregisterClientBoost(unregisterClientBoostRequest.data().clientId()))
+            }
             sendResponse(response, response.responseSend)
           case response: CloseConnectionResponse =>
             updateRequestMetrics(response)

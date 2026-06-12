@@ -1480,6 +1480,16 @@ public class MockAdminClient extends AdminClient {
     }
 
     @Override
+    public RegisterClientBoostResult registerClientBoost(String clientId, RegisterClientBoostOptions options) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    @Override
+    public UnregisterClientBoostResult unregisterClientBoost(String clientId, UnregisterClientBoostOptions options) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    @Override
     public synchronized void close(Duration timeout) {}
 
     public synchronized void updateBeginningOffsets(Map<TopicPartition, Long> newOffsets) {

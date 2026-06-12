@@ -2129,4 +2129,48 @@ public interface Admin extends AutoCloseable {
      */
     TerminateTransactionResult forceTerminateTransaction(String transactionalId, 
                                                         TerminateTransactionOptions options);
+
+    /**
+     * Register client boost for the given client ID.
+     * <p>
+     * This is a convenience method for {@link #registerClientBoost(String, RegisterClientBoostOptions)}
+     * with default options.
+     *
+     * @param clientId              The ID of the client to boost.
+     * @return The RegisterClientBoostResult.
+     */
+    default RegisterClientBoostResult registerClientBoost(String clientId) {
+        return registerClientBoost(clientId, new RegisterClientBoostOptions());
+    }
+
+    /**
+     * Register client boost for the given client ID.
+     *
+     * @param clientId              The ID of the client to boost.
+     * @param options               The options to use when register boost for the client.
+     * @return The RegisterClientBoostResult.
+     */
+    RegisterClientBoostResult registerClientBoost(String clientId, RegisterClientBoostOptions options);
+
+    /**
+     * Unregister client boost for the given client ID.
+     * <p>
+     * This is a convenience method for {@link #unregisterClientBoost(String, UnregisterClientBoostOptions)}
+     * with default options.
+     *
+     * @param clientId              The ID of the client to unregister boost.
+     * @return The UnregisterClientBoostResult.
+     */
+    default UnregisterClientBoostResult unregisterClientBoost(String clientId) {
+        return unregisterClientBoost(clientId, new UnregisterClientBoostOptions());
+    }
+
+    /**
+     * Unregister client boost for the given client ID.
+     *
+     * @param clientId              The ID of the client to unregister boost.
+     * @param options               The options to use when unregister boost for the client.
+     * @return The RegisterClientBoostResult.
+     */
+    UnregisterClientBoostResult unregisterClientBoost(String clientId, UnregisterClientBoostOptions options);
 }

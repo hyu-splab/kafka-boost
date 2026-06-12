@@ -139,6 +139,8 @@ import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.RaftVoterEndpoint;
 import org.apache.kafka.clients.admin.RecordsToDelete;
+import org.apache.kafka.clients.admin.RegisterClientBoostOptions;
+import org.apache.kafka.clients.admin.RegisterClientBoostResult;
 import org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions;
 import org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult;
 import org.apache.kafka.clients.admin.RemoveRaftVoterOptions;
@@ -149,6 +151,8 @@ import org.apache.kafka.clients.admin.TerminateTransactionOptions;
 import org.apache.kafka.clients.admin.TerminateTransactionResult;
 import org.apache.kafka.clients.admin.UnregisterBrokerOptions;
 import org.apache.kafka.clients.admin.UnregisterBrokerResult;
+import org.apache.kafka.clients.admin.UnregisterClientBoostOptions;
+import org.apache.kafka.clients.admin.UnregisterClientBoostResult;
 import org.apache.kafka.clients.admin.UpdateFeaturesOptions;
 import org.apache.kafka.clients.admin.UpdateFeaturesResult;
 import org.apache.kafka.clients.admin.UserScramCredentialAlteration;
@@ -497,6 +501,16 @@ public class TestingMetricsInterceptingAdminClient extends AdminClient {
     @Override
     public DescribeClassicGroupsResult describeClassicGroups(final Collection<String> groupIds, final DescribeClassicGroupsOptions options) {
         return adminDelegate.describeClassicGroups(groupIds, options);
+    }
+
+    @Override
+    public RegisterClientBoostResult registerClientBoost(String clientId, RegisterClientBoostOptions options) {
+        return adminDelegate.registerClientBoost(clientId, options);
+    }
+
+    @Override
+    public UnregisterClientBoostResult unregisterClientBoost(String clientId, UnregisterClientBoostOptions options) {
+        return adminDelegate.unregisterClientBoost(clientId, options);
     }
 
     @Override

@@ -367,6 +367,16 @@ public class ForwardingAdmin implements Admin {
     }
 
     @Override
+    public RegisterClientBoostResult registerClientBoost(String clientId, RegisterClientBoostOptions options) {
+        return delegate.registerClientBoost(clientId, options);
+    }
+
+    @Override
+    public UnregisterClientBoostResult unregisterClientBoost(String clientId, UnregisterClientBoostOptions options) {
+        return delegate.unregisterClientBoost(clientId, options);
+    }
+
+    @Override
     public void registerMetricForSubscription(KafkaMetric metric) {
         throw new UnsupportedOperationException();
     }

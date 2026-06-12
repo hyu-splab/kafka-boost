@@ -354,6 +354,10 @@ public abstract class AbstractRequest implements AbstractRequestResponse {
                 return AlterShareGroupOffsetsRequest.parse(readable, apiVersion);
             case DELETE_SHARE_GROUP_OFFSETS:
                 return DeleteShareGroupOffsetsRequest.parse(readable, apiVersion);
+            case REGISTER_CLIENT_BOOST:
+                return RegisterClientBoostRequest.parse(readable, apiVersion);
+            case UNREGISTER_CLIENT_BOOST:
+                return UnregisterClientBoostRequest.parse(readable, apiVersion);
             default:
                 throw new AssertionError(String.format("ApiKey %s is not currently handled in `parseRequest`, the " +
                         "code should be updated to do so.", apiKey));

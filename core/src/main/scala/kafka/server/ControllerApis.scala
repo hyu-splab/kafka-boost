@@ -132,6 +132,8 @@ class ControllerApis(
         case ApiKeys.ADD_RAFT_VOTER => handleAddRaftVoter(request)
         case ApiKeys.REMOVE_RAFT_VOTER => handleRemoveRaftVoter(request)
         case ApiKeys.UPDATE_RAFT_VOTER => handleUpdateRaftVoter(request)
+        case ApiKeys.REGISTER_CLIENT_BOOST => handleRegisterClientBoostRequest(request)
+        case ApiKeys.UNREGISTER_CLIENT_BOOST => handleUnregisterClientBoostRequest(request)
         case _ => throw new ApiException(s"Unsupported ApiKey ${request.context.header.apiKey}")
       }
 
@@ -1100,6 +1102,22 @@ class ControllerApis(
   def handleUpdateRaftVoter(request: RequestChannel.Request): CompletableFuture[Unit] = {
     authHelper.authorizeClusterOperation(request, CLUSTER_ACTION)
     handleRaftRequest(request, response => new UpdateRaftVoterResponse(response.asInstanceOf[UpdateRaftVoterResponseData]))
+  }
+
+  def handleRegisterClientBoostRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
+    authHelper.authorizeClusterOperation(request, ALTER)
+
+    val response = new RegisterClientBoostResponse(new RegisterClientBoostResponseData())
+    requestHelper.sendResponseExemptThrottle(request, response)
+    CompletableFuture.completedFuture[Unit](())
+  }
+
+  def handleUnregisterClientBoostRequest(request: RequestChannel.Request): CompletableFuture[Unit] = {
+    authHelper.authorizeClusterOperation(request, ALTER)
+
+    val response = new UnregisterClientBoostResponse(new UnregisterClientBoostResponseData())
+    requestHelper.sendResponseExemptThrottle(request, response)
+    CompletableFuture.completedFuture[Unit](())
   }
 }
 
