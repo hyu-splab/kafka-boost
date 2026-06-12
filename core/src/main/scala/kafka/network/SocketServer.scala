@@ -396,36 +396,36 @@ private[network] class ClientBoostManager(listenerName: ListenerName,
 
   private var apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder] = None
 
-  private val dedicatedProcessorsByClientId = new ConcurrentHashMap[String, Option[DedicatedProcessor]]()
+  private var spareDedicatedProcessor: Option[DedicatedProcessor] = None
+  private val dedicatedProcessorsByClientId = new ConcurrentHashMap[String, DedicatedProcessor]()
 
   def registerClientBoost(clientId: String): Unit = {
-    dedicatedProcessorsByClientId.putIfAbsent(clientId, None)
+    dedicatedProcessorsByClientId.computeIfAbsent(clientId, _ => {
+      if (spareDedicatedProcessor.isEmpty) spareDedicatedProcessor = Some(newDedicatedProcessor())
+      val newDP = spareDedicatedProcessor.get
+      spareDedicatedProcessor = Some(newDedicatedProcessor())
+      newDP.processor.start()
+      newDP
+    })
   }
 
   def unregisterClientBoost(clientId: String): Unit = {
-    val entry = dedicatedProcessorsByClientId.get(clientId)
+    val dedicatedProcessor = dedicatedProcessorsByClientId.get(clientId)
     dedicatedProcessorsByClientId.remove(clientId)
-    entry.foreach(_.close())
+    if (dedicatedProcessor != null) dedicatedProcessor.close()
   }
 
   def setApiRequestHandlerBuilder(apiRequestHandlerBuilder: Option[ApiRequestHandlerBuilder]): Unit = {
     this.apiRequestHandlerBuilder = apiRequestHandlerBuilder
     dedicatedProcessorsByClientId.forEach((_, p) =>
-      p.foreach(_.processor.setDedicatedHandler(apiRequestHandlerBuilder))
+      p.processor.setDedicatedHandler(apiRequestHandlerBuilder)
     )
   }
 
-  def getOrCreateDedicatedProcessorIfNeeded(clientId: String): Option[Processor] = {
-    def createAndStartNewDedicatedProcessor(): DedicatedProcessor = {
-      val newDP = newDedicatedProcessor()
-      newDP.processor.start()
-      newDP
-    }
-    val destProcessorInfoOption = dedicatedProcessorsByClientId.computeIfPresent(clientId, (_, oldDP) => {
-      Some(oldDP.getOrElse(createAndStartNewDedicatedProcessor()))
-    })
-    if (destProcessorInfoOption == null) return None
-    destProcessorInfoOption.map(_.processor)
+  def getDedicatedProcessor(clientId: String): Option[Processor] = {
+    val dedicatedProcessor = dedicatedProcessorsByClientId.get(clientId)
+    if (dedicatedProcessor == null) return None
+    Some(dedicatedProcessor.processor)
   }
 
   def newDedicatedProcessor(): DedicatedProcessor = {
@@ -1380,7 +1380,7 @@ private[kafka] class Processor(
                       apiVersionsRequest.data.clientSoftwareVersion))
                   }
                   maybeClientBoostManager
-                    .flatMap(_.getOrCreateDedicatedProcessorIfNeeded(req.header.clientId))
+                    .flatMap(_.getDedicatedProcessor(req.header.clientId))
                     .foreach(destProcessor => reserveReassign(channel, destProcessor))
                 }
                 if (!reassignChannelIfNeeded(channel, req)) {
