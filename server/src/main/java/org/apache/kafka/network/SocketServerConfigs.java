@@ -163,7 +163,7 @@ public class SocketServerConfigs {
     public static final String BOOSTER_CHECK_INTERVAL_MS_DOC = "The frequency, in milliseconds, at which the booster manager scans channels to boost or return to standard processing paths.";
 
     public static final String BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_CONFIG = "booster.new.channel.cooldown.ticks";
-    public static final int BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_DEFAULT = 100;
+    public static final int BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_DEFAULT = 10;
     public static final String BOOSTER_NEW_CHANNEL_COOLDOWN_TICKS_DOC = "The number of check cycles (ticks) that must elapse after a new channel is created before it becomes eligible for booster assignment. This cooldown period allows the request pattern to stabilize as new channels may experience transient surges during startup.";
 
     public static final String BOOSTER_GLOBAL_REASSIGN_COOLDOWN_TICKS_CONFIG = "booster.global.reassign.cooldown.ticks";
